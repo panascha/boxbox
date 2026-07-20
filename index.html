@@ -88,7 +88,7 @@
   /* Tabs Layout */
   .tabs {
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(7, 1fr);
     gap: 3px;
     background: var(--surface-raised);
     border-radius: 12px;
@@ -526,6 +526,110 @@
     font-size: 12px;
     padding: 30px;
   }
+
+  /* Coach Chat */
+  .chat-wrap {
+    display: flex;
+    flex-direction: column;
+    height: calc(100dvh - 240px);
+    min-height: 360px;
+  }
+
+  .chat-msgs {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .chat-msg {
+    max-width: 85%;
+    padding: 8px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .chat-msg.user {
+    align-self: flex-end;
+    background: var(--moss);
+    color: #ffffff;
+    border-bottom-right-radius: 4px;
+  }
+
+  .chat-msg.bot {
+    align-self: flex-start;
+    background: var(--surface-raised);
+    border: 1px solid var(--line);
+    border-bottom-left-radius: 4px;
+  }
+
+  .chat-input-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .chat-input-row input {
+    flex: 1;
+    padding: 9px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+  }
+
+  .chat-input-row button {
+    background: var(--moss);
+    color: #ffffff;
+    border: none;
+    border-radius: 20px;
+    padding: 8px 16px;
+    font-family: var(--font-body);
+    font-weight: 600;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .chat-input-row button:active {
+    transform: scale(0.96);
+  }
+
+  .chat-input-row button:disabled {
+    opacity: 0.5;
+  }
+
+  .typing-dots {
+    display: flex;
+    gap: 3px;
+    padding: 8px 14px;
+  }
+
+  .typing-dots span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    animation: dot-bounce 1.2s infinite ease-in-out;
+  }
+
+  .typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+  .typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+
+  @keyframes dot-bounce {
+    0%, 80%, 100% { opacity: 0.2; transform: translateY(0); }
+    40% { opacity: 1; transform: translateY(-4px); }
+  }
+
+  .chat-empty {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 11px;
+    padding: 40px 16px;
+    line-height: 1.6;
+  }
 </style>
 </head>
 
@@ -559,6 +663,9 @@
         <circle cx="12" cy="12" r="3" />
         <path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" />
       </svg>Config</button>
+    <button class="tab-btn" data-tab="coach"><svg viewBox="0 0 24 24">
+        <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+      </svg>โค้ช</button>
   </div>
 
   <!-- Quick Log Area for Lazy People (Stays sticky on Home) -->
@@ -632,6 +739,7 @@
     try { const r = await S.get('food-logs'); state.food = r ? JSON.parse(r.value) : []; } catch (e) { state.food = []; }
     try { const r = await S.get('cycle-settings'); state.cycle = r ? JSON.parse(r.value) : defaults.cycle; } catch (e) { state.cycle = defaults.cycle; }
     try { const r = await S.get('eating-seq'); state.eatingSeq = r ? JSON.parse(r.value) : [false, false, false, false]; } catch (e) { state.eatingSeq = [false, false, false, false]; }
+    await loadChatHistory();
   }
 
   async function save(key, val) {
@@ -943,6 +1051,11 @@
       </div>
       <label style="margin-top:6px; display:block;">โน้ตเพิ่มเติม</label>
       <textarea id="c-notes" placeholder="เช่น รู้สึกดี, ซ้อมช่วงเช้า ท้องว่าง"></textarea>
+      <div style="display:flex;gap:6px;margin-top:4px;">
+        <button class="ghost" style="flex:1;" onclick="document.getElementById('photo-input').click()">📸 อ่านจากรูป (Strava/ลู่วิ่ง)</button>
+        <input type="file" id="photo-input" accept="image/*" capture="environment" style="display:none;" onchange="extractFromPhoto(this)">
+      </div>
+      <div id="photo-status" style="font-size:10px;color:var(--text-dim);margin-top:4px;display:none;"></div>
       <button class="primary" onclick="addCardio()">บันทึกกิจกรรมคาร์ดิโอ</button>
     </div>
 
@@ -972,6 +1085,90 @@
     const [m, s] = pace.split(':').map(Number);
     if (isNaN(m)) return null;
     return m + (s || 0) / 60;
+  }
+
+  async function extractFromPhoto(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const st = document.getElementById('photo-status');
+    st.style.display = 'block'; st.textContent = '⏳ กำลังวิเคราะห์รูป...';
+
+    try {
+      // Resize image to ≤1024px for API
+      const img = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const i = new Image();
+          i.onload = () => resolve(i);
+          i.onerror = reject;
+          i.src = reader.result;
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const maxDim = 1024;
+      let w = img.width, h = img.height;
+      if (w > maxDim || h > maxDim) {
+        const ratio = Math.min(maxDim / w, maxDim / h);
+        w = Math.round(w * ratio); h = Math.round(h * ratio);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      const base64 = canvas.toDataURL('image/jpeg', 0.8);
+
+      const prompt = `วิเคราะห์รูปภาพนี้ — มันคือภาพหน้าจอ Strava หรือหน้าจอลู่วิ่ง แยกข้อมูลต่อไปนี้แล้วตอบเป็น JSON เท่านั้น (ห้ามตอบอย่างอื่น):
+  {
+    "type": "เดิน/วิ่งปน (Fartlek)" หรือ "วิ่ง" หรือ "เดิน" หรือ "เดินขึ้นเนิน/ชัน",
+    "distanceKm": ตัวเลข (km),
+    "durationMin": ตัวเลข (นาที),
+    "avgHr": ตัวเลข หรือ null,
+    "rpe": ตัวเลข 1-10 หรือ null,
+    "notes": "ข้อความสั้นๆ จากในรูป หรือ null"
+  }
+  ถ้าอ่านค่าไหนไม่ได้ ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
+
+      const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
+      const result = await callGemini('gemini-2.5-flash-lite', contents, null);
+
+      if (result.error) {
+        st.textContent = `❌ ${result.error}`;
+        return;
+      }
+
+      // Parse JSON from response
+      let json = null;
+      const jsonMatch = result.text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try { json = JSON.parse(jsonMatch[0]); } catch (e) {}
+      }
+
+      if (!json) {
+        st.textContent = '❌ ไม่สามารถแยกข้อมูลจากรูปได้ — ลองใหม่หรือกรอกเอง';
+        return;
+      }
+
+      // Auto-fill form
+      if (json.type && document.getElementById('c-type')) {
+        const sel = document.getElementById('c-type');
+        const opts = [...sel.options].map(o => o.value);
+        const match = opts.find(o => o.includes(json.type) || json.type.includes(o));
+        if (match) sel.value = match;
+      }
+      if (json.distanceKm) document.getElementById('c-dist').value = json.distanceKm;
+      if (json.durationMin) document.getElementById('c-dur').value = json.durationMin;
+      if (json.avgHr) document.getElementById('c-hr').value = json.avgHr;
+      if (json.rpe) document.getElementById('c-rpe').value = json.rpe;
+      if (json.notes) document.getElementById('c-notes').value = json.notes;
+
+      st.textContent = `✅ อ่านสำเร็จ: ${json.type || '—'} · ${json.distanceKm || '?'}km · ${json.durationMin || '?'}นาที — ตรวจสอบและกดบันทึก`;
+    } catch (e) {
+      st.textContent = `❌ เกิดข้อผิดพลาด: ${e.message}`;
+    }
+
+    // Reset input so same file can be re-selected
+    input.value = '';
   }
 
   function addCardio() {
@@ -1301,6 +1498,24 @@
     </div>
 
     <div class="card">
+      <h2>Gemini API Keys</h2>
+      <div style="font-size:11px;color:var(--text-dim);line-height:1.5;margin-bottom:8px;">
+        ใส่ API Key ของ Google AI Studio (1 key ต่อบรรทัด) — ระบบจะใช้หลาย key สลับอัตโนมัติเมื่อถึงลิมิต
+      </div>
+      <textarea id="gemini-keys-input" rows="3" placeholder="AIzaSy..." style="font-size:11px;font-family:var(--font-mono);">${geminiKeys().join('\n')}</textarea>
+      <button class="primary" style="margin-top:6px;" onclick="saveGeminiKeys()">บันทึก API Keys</button>
+    </div>
+
+    <div class="card">
+      <h2>นำเข้า / ส่งออกข้อมูล</h2>
+      <div style="display:flex;gap:6px;">
+        <button class="ghost" style="flex:1;" onclick="exportAllData()">⬇ ส่งออกข้อมูล</button>
+        <button class="ghost" style="flex:1;" onclick="document.getElementById('import-file').click()">⬆ นำเข้าข้อมูล</button>
+        <input type="file" id="import-file" accept=".json" style="display:none;" onchange="importAllData(this)">
+      </div>
+    </div>
+
+    <div class="card">
       <h2>จัดการข้อมูลในเบราว์เซอร์</h2>
       <div style="font-size:11px;color:var(--text-dim);line-height:1.5;">
         ข้อมูลทั้งหมดเก็บไว้บนความปลอดภัยในเบราว์เซอร์ส่วนตัวของคุณเท่านั้น (Local Storage)
@@ -1321,14 +1536,286 @@
     toast('บันทึกการปรับปรุงเป้าหมายสำเร็จ');
   }
 
+  function saveGeminiKeys() {
+    const raw = document.getElementById('gemini-keys-input').value;
+    const keys = raw.split('\n').map(k => k.trim()).filter(k => k.length > 0);
+    localStorage.setItem('gemini-keys', JSON.stringify(keys));
+    toast(`บันทึก ${keys.length} API key${keys.length > 1 ? 's' : ''} เรียบร้อย`);
+  }
+
+  function exportAllData() {
+    const data = {};
+    for (const k of ['profile','cardio-logs','gym-logs','food-logs','cycle-settings','eating-seq','coach-chats']) {
+      const v = localStorage.getItem(k);
+      if (v !== null) data[k] = JSON.parse(v);
+    }
+    const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `boxbox-backup-${todayStr()}.json`; a.click();
+    URL.revokeObjectURL(url);
+    toast('ส่งออกข้อมูลสำเร็จ');
+  }
+
+  function importAllData(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function() {
+      try {
+        const data = JSON.parse(reader.result);
+        const validKeys = ['profile','cardio-logs','gym-logs','food-logs','cycle-settings','eating-seq','coach-chats'];
+        const keys = Object.keys(data).filter(k => validKeys.includes(k));
+        if (!keys.length) { toast('ไม่พบข้อมูลที่ถูกต้องในไฟล์'); return; }
+        if (!confirm(`พบข้อมูล ${keys.length} รายการ (${keys.join(', ')})\n\nต้องการเขียนทับข้อมูลปัจจุบันหรือไม่?`)) return;
+        for (const k of keys) {
+          localStorage.setItem(k, JSON.stringify(data[k]));
+        }
+        toast('นำเข้าข้อมูลสำเร็จ — กำลังโหลดใหม่...');
+        setTimeout(() => location.reload(), 500);
+      } catch (e) {
+        toast('ไฟล์ไม่ถูกต้อง — กรุณาเลือกไฟล์ .json ที่ส่งออกจากระบบนี้');
+      }
+    };
+    reader.readAsText(file);
+  }
+
   async function resetAll() {
     if (!confirm('ล้างข้อมูลทั้งหมด? การกระทำนี้ไม่สามารถย้อนคืนได้')) return;
-    for (const k of ['profile', 'cardio-logs', 'gym-logs', 'food-logs', 'cycle-settings', 'eating-seq']) {
+    for (const k of ['profile', 'cardio-logs', 'gym-logs', 'food-logs', 'cycle-settings', 'eating-seq', 'coach-chats', 'gemini-keys']) {
       try { await S.delete(k); } catch (e) { }
     }
     await loadAll();
     toast('ระบบได้รับการล้างข้อมูลเสร็จเรียบร้อย');
     route('overview');
+  }
+
+  // ---------- Coach chat ----------
+  let chatHistory = [];
+  let coachTyping = false;
+
+  async function loadChatHistory() {
+    try { const r = await S.get('coach-chats'); chatHistory = r ? JSON.parse(r.value) : []; }
+    catch (e) { chatHistory = []; }
+  }
+
+  function saveChatHistory() {
+    save('coach-chats', chatHistory);
+  }
+
+  // Gemini key rotation
+  function geminiKeys() {
+    try { return JSON.parse(localStorage.getItem('gemini-keys') || '[]'); }
+    catch (e) { return []; }
+  }
+
+  function rotateKey() {
+    const keys = geminiKeys();
+    if (keys.length > 1) {
+      const first = keys.shift();
+      keys.push(first);
+      localStorage.setItem('gemini-keys', JSON.stringify(keys));
+    }
+  }
+
+  async function callGemini(model, contents, systemInstruction) {
+    const keys = geminiKeys();
+    if (!keys.length) return { error: 'ยังไม่ได้ตั้งค่า API Key — ไปที่แท็บ Config แล้วใส่ Gemini API Key' };
+
+    let lastError = '';
+    for (let attempt = 0; attempt < keys.length; attempt++) {
+      const key = keys[attempt];
+      const body = { contents, generationConfig: { temperature: 0.7, maxOutputTokens: 1024 } };
+      if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
+
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+
+        if (res.status === 429) {
+          rotateKey();
+          lastError = 'ถึงขีดจำกัด API — เปลี่ยน key อัตโนมัติ';
+          continue;
+        }
+
+        if (!res.ok) {
+          const err = await res.text();
+          lastError = `API error ${res.status}: ${err.slice(0, 120)}`;
+          continue;
+        }
+
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) return { text: text.trim() };
+        lastError = 'API ตอบกลับโดยไม่มีข้อความ';
+      } catch (e) {
+        lastError = `เชื่อมต่อล้มเหลว: ${e.message}`;
+      }
+    }
+    return { error: lastError || 'ไม่มี API key ใช้ได้' };
+  }
+
+  function buildCoachSystemPrompt() {
+    const p = state.profile || {};
+    const info = cycleInfo();
+    const today = todayStr();
+    const todayCardio = state.cardio.filter(c => c.date === today);
+    const todayGym = state.gym.filter(g => g.date === today);
+    const todayFood = state.food.filter(f => f.date === today);
+    const cals = todayFood.reduce((s, f) => s + Number(f.calories || 0), 0);
+    const protein = todayFood.reduce((s, f) => s + Number(f.protein || 0), 0);
+
+    // Recent 7 days summary
+    const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    const weekCardio = state.cardio.filter(c => c.date >= weekAgo).length;
+    const weekGym = state.gym.filter(g => g.date >= weekAgo).length;
+    const weekFoodEntries = state.food.filter(f => f.date >= weekAgo);
+
+    return `คุณคือโค้ชซ้อมส่วนตัวของผู้ใช้คนนี้ ช่วยตอบคำถามและให้คำแนะนำการซ้อม อาหาร และรอบเดือน
+
+  ข้อมูลผู้ใช้:
+  - น้ำหนักปัจจุบัน: ${p.currentWeight || '—'} kg
+  - น้ำหนักเป้าหมาย: ${p.weightGoal || '—'} kg (เดดไลน์: ${p.deadline || '—'})
+  - TDEE: ${p.tdee || '—'} kcal
+  - แคลอรี่เป้าหมาย/วัน: ${p.calorieTarget || '—'} kcal
+  - โปรตีนเป้าหมาย/วัน: ${p.proteinTarget || '—'}g
+
+  รอบเดือนวันนี้:
+  - วันที่ ${info.dayInCycle} / ${info.cycleLength} — ช่วง: ${info.phase}
+  - ${info.advice}
+  - ${info.intensityDesc}
+
+  วันนี้:
+  - คาร์ดิโอ: ${todayCardio.length} ครั้ง — ${todayCardio.map(c => c.type + ' ' + c.distanceKm + 'km ' + c.durationMin + 'นาที').join(', ') || 'ยังไม่มี'}
+  - ยิม: ${todayGym.length} ครั้ง — ${todayGym.map(g => g.dayLabel).join(', ') || 'ยังไม่มี'}
+  - อาหาร: ${todayFood.length} มื้อ รวม ${cals} kcal โปรตีน ${protein}g
+  - อาหารล่าสุด: ${todayFood.length ? todayFood.map(f => f.time + ' ' + f.label).sort().slice(-1)[0] : 'ยังไม่มี'}
+
+  7 วันล่าสุด:
+  - คาร์ดิโอ ${weekCardio} ครั้ง
+  - ยิม ${weekGym} ครั้ง
+  - จดอาหาร ${weekFoodEntries.length} มื้อ
+
+  สำคัญ:
+  1. เป้าหมายแคลอรี่ ${p.calorieTarget || '—'} เทียบกับ TDEE ${p.tdee || '—'} คือการตัดแคลอรี่ที่สูง — ถ้าผู้ใช้บันทึกแคลอรี่ไม่ครบ ให้ระวังว่าตัวเลขอาจต่ำกว่าความจริง
+  2. ความถี่ยิม ${weekGym} ครั้ง/สัปดาห์ — ถ้าน้อยกว่า 3-4 ครั้ง การเพิ่มกล้ามเนื้อส่วนบนจะช้า
+  3. ใช้ภาษาที่เป็นกันเอง ให้กำลังใจ แต่ซื่อสัตย์
+  4. ถ้าข้อมูลดูขัดแย้ง ให้ถามผู้ใช้ก่อนสรุป
+  5. ตอบเป็นภาษาไทยเท่านั้น`;
+  }
+
+  function renderCoach() {
+    document.getElementById('content').innerHTML = `
+    <div class="card" style="display:flex; flex-direction:column; overflow:hidden;">
+      <div class="chat-wrap">
+        <div class="chat-msgs" id="chat-msgs">
+          ${chatHistory.length ? '' : '<div class="chat-empty">สวัสดี! เราเป็นโค้ชส่วนตัวของคุณ 🏋️<br>ถามเรื่องซ้อม อาหาร หรือรอบเดือนได้เลย — ระบบจะอ่านข้อมูลของคุณเพื่อให้คำแนะนำที่ตรงกับคุณที่สุด</div>'}
+        </div>
+        <div class="chat-input-row">
+          <input type="text" id="coach-input" placeholder="ถามโค้ช..." onkeydown="if(event.key==='Enter')sendCoachMsg()">
+          <button id="coach-send-btn" onclick="sendCoachMsg()">ส่ง</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+    renderChatMessages();
+
+    // Proactive suggestion on first open with no history
+    if (!chatHistory.length) {
+      setTimeout(() => sendProactiveSuggestion(), 200);
+    }
+  }
+
+  function renderChatMessages() {
+    const el = document.getElementById('chat-msgs');
+    if (!el) return;
+    if (!chatHistory.length) return;
+
+    el.innerHTML = chatHistory.map(m => `
+      <div class="chat-msg ${m.role}">${escapeHtml(m.text)}</div>
+    `).join('');
+
+    // Scroll to bottom
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  async function sendCoachMsg() {
+    if (coachTyping) return;
+    const input = document.getElementById('coach-input');
+    const text = input.value.trim();
+    if (!text) return;
+
+    input.value = '';
+    chatHistory.push({ role: 'user', text });
+    saveChatHistory();
+    renderChatMessages();
+    showTyping();
+
+    const systemPrompt = buildCoachSystemPrompt();
+    // Build contents with conversation history (last 10 exchanges)
+    const contents = [];
+    const recent = chatHistory.slice(-20); // last 10 user+bot pairs
+    for (const m of recent) {
+      if (m.role === 'user') {
+        contents.push({ role: 'user', parts: [{ text: m.text }] });
+      } else if (m.role === 'bot') {
+        contents.push({ role: 'model', parts: [{ text: m.text }] });
+      }
+    }
+
+    const result = await callGemini('gemini-2.5-flash', contents, systemPrompt);
+    hideTyping();
+
+    if (result.error) {
+      chatHistory.push({ role: 'bot', text: `⚠️ ${result.error}` });
+    } else {
+      chatHistory.push({ role: 'bot', text: result.text });
+    }
+    saveChatHistory();
+    renderChatMessages();
+  }
+
+  async function sendProactiveSuggestion() {
+    if (chatHistory.length) return;
+    coachTyping = true;
+
+    const systemPrompt = buildCoachSystemPrompt();
+    const contents = [{ role: 'user', parts: [{ text: 'ช่วยวิเคราะห์ข้อมูลของฉันวันนี้และแนะนำสิ่งที่ควรทำวันนี้หน่อย — พูดสั้นๆ 1-2 ประโยค เป็นภาษาไทย' }] }];
+
+    const result = await callGemini('gemini-2.5-flash', contents, systemPrompt);
+    coachTyping = false;
+
+    if (result.text) {
+      chatHistory.push({ role: 'bot', text: result.text });
+      saveChatHistory();
+      renderChatMessages();
+    }
+  }
+
+  function showTyping() {
+    coachTyping = true;
+    const el = document.getElementById('chat-msgs');
+    if (!el) return;
+    const div = document.createElement('div');
+    div.className = 'chat-msg bot';
+    div.id = 'typing-indicator';
+    div.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
+    el.appendChild(div);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function hideTyping() {
+    coachTyping = false;
+    const el = document.getElementById('typing-indicator');
+    if (el) el.remove();
   }
 
   // ---------- shared ----------
@@ -1339,7 +1826,7 @@
     route(kind);
   }
 
-  const routers = { overview: renderOverview, cardio: renderCardio, gym: renderGym, food: renderFood, cycle: renderCycle, settings: renderSettings };
+  const routers = { overview: renderOverview, cardio: renderCardio, gym: renderGym, food: renderFood, cycle: renderCycle, settings: renderSettings, coach: renderCoach };
   function route(tab) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
 
