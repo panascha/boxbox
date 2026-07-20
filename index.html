@@ -567,7 +567,12 @@
 <div class="toast" id="toast"></div>
 
 <script>
-  const S = window.storage;
+  // localStorage shim — keeps the { value } shape the rest of this file expects.
+  const S = {
+    async get(k) { const v = localStorage.getItem(k); return v === null ? null : { value: v }; },
+    async set(k, v) { localStorage.setItem(k, v); },
+    async delete(k) { localStorage.removeItem(k); }
+  };
   let state = { profile: null, cardio: [], gym: [], food: [], cycle: null, eatingSeq: [false, false, false, false] };
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
