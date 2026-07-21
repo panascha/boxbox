@@ -731,6 +731,15 @@
 
   const todayStr = () => new Date().toISOString().slice(0, 10);
   const fmtDate = (d) => d ? new Date(d + 'T00:00:00').toLocaleDateString('th-TH', { day: 'numeric', month: 'short' }) : '—';
+  const fmtDuration = (min) => {
+    if (min == null || isNaN(min)) return '—';
+    const totalSec = Math.round(min * 60);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    return `${m}:${String(s).padStart(2,'0')}`;
+  };
 
   async function loadAll() {
     try { const r = await S.get('profile'); state.profile = r ? JSON.parse(r.value) : defaults.profile; } catch (e) { state.profile = defaults.profile; }
@@ -1095,7 +1104,7 @@
       ${state.cardio.length ? [...state.cardio].sort((a, b) => b.date.localeCompare(a.date)).map(c => `
         <div class="entry">
           <div><div class="entry-main">${c.type} · ${c.distanceKm} km ${zoneBadge(c)}</div>
-          <div class="entry-meta">${fmtDate(c.date)} · ${c.durationMin} นาที · Pace ${c.pace}/km · HR ${c.avgHr || '-'} · RPE ${c.rpe || '-'}</div>
+          <div class="entry-meta">${fmtDate(c.date)} · ${fmtDuration(c.durationMin)} · Pace ${c.pace}/km · HR ${c.avgHr || '-'} · RPE ${c.rpe || '-'}</div>
           ${c.notes ? `<div class="entry-meta" style="margin-top:2px; color:var(--text);">${c.notes}</div>` : ''}</div>
           <button class="del" onclick="delEntry('cardio','${c.id}')">✕</button>
         </div>`).join('') : '<div class="empty">ยังไม่มีบันทึกคาร์ดิโอ</div>'}
@@ -1201,7 +1210,7 @@
       if (json.rpe) document.getElementById('c-rpe').value = json.rpe;
       if (json.notes) document.getElementById('c-notes').value = json.notes;
 
-      st.textContent = `✅ อ่านสำเร็จ: ${json.type || '—'} · ${json.distanceKm || '?'}km · ${json.durationMin || '?'}นาที — ตรวจสอบและกดบันทึก`;
+      st.textContent = `✅ อ่านสำเร็จ: ${json.type || '—'} · ${json.distanceKm || '?'}km · ${fmtDuration(json.durationMin)} — ตรวจสอบและกดบันทึก`;
     } catch (e) {
       st.textContent = `❌ เกิดข้อผิดพลาด: ${e.message}`;
     }
@@ -1781,7 +1790,7 @@
   - ${info.intensityDesc}
 
   วันนี้:
-  - คาร์ดิโอ: ${todayCardio.length} ครั้ง — ${todayCardio.map(c => c.type + ' ' + c.distanceKm + 'km ' + c.durationMin + 'นาที').join(', ') || 'ยังไม่มี'}
+  - คาร์ดิโอ: ${todayCardio.length} ครั้ง — ${todayCardio.map(c => c.type + ' ' + c.distanceKm + 'km ' + fmtDuration(c.durationMin)).join(', ') || 'ยังไม่มี'}
   - ยิม: ${todayGym.length} ครั้ง — ${todayGym.map(g => g.dayLabel).join(', ') || 'ยังไม่มี'}
   - อาหาร: ${todayFood.length} มื้อ รวม ${cals} kcal โปรตีน ${protein}g
   - อาหารล่าสุด: ${todayFood.length ? todayFood.map(f => f.time + ' ' + f.label).sort().slice(-1)[0] : 'ยังไม่มี'}
