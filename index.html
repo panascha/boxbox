@@ -1094,6 +1094,8 @@
       <div style="display:flex;gap:6px;margin-top:4px;">
         <button class="ghost" style="flex:1;" onclick="document.getElementById('photo-input').click()">📸 อ่านจากรูป (Strava/ลู่วิ่ง)</button>
         <input type="file" id="photo-input" accept="image/*" capture="environment" style="display:none;" onchange="extractFromPhoto(this)">
+        <button class="ghost" style="flex:1;" onclick="document.getElementById('tcx-input').click()">📁 อ่านจากไฟล์ (.tcx)</button>
+        <input type="file" id="tcx-input" accept=".tcx,.xml" style="display:none;" onchange="extractFromTCX(this)">
       </div>
       <div id="photo-status" style="font-size:10px;color:var(--text-dim);margin-top:4px;display:none;"></div>
       <button class="primary" onclick="addCardio()">บันทึกกิจกรรมคาร์ดิโอ</button>
@@ -1217,6 +1219,88 @@
 
     // Reset input so same file can be re-selected
     input.value = '';
+  }
+
+  function extractFromTCX(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const st = document.getElementById('photo-status');
+    st.style.display = 'block'; st.textContent = '⏳ กำลังอ่านไฟล์ TCX...';
+
+    const reader = new FileReader();
+    reader.onload = function() {
+      try {
+        const xml = reader.result;
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(xml, 'text/xml');
+
+        // Check for parse error
+        if (doc.querySelector('parsererror')) {
+          st.textContent = '❌ ไฟล์ TCX ไม่ถูกต้อง — ตรวจสอบรูปแบบไฟล์';
+          input.value = ''; return;
+        }
+
+        // Try Garmin TCX namespace
+        const ns = 'http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2';
+        const lap = doc.getElementsByTagNameNS(ns, 'Lap')[0] || doc.querySelector('Lap');
+        if (!lap) {
+          st.textContent = '❌ ไม่พบข้อมูล Lap ในไฟล์ — อาจไม่ใช่ TCX จาก Garmin';
+          input.value = ''; return;
+        }
+
+        const totalTimeEl = lap.getElementsByTagNameNS(ns, 'TotalTimeSeconds')[0] || lap.querySelector('TotalTimeSeconds');
+        const distEl = lap.getElementsByTagNameNS(ns, 'DistanceMeters')[0] || lap.querySelector('DistanceMeters');
+        const hrEl = lap.getElementsByTagNameNS(ns, 'AverageHeartRateBpm')[0] || lap.querySelector('AverageHeartRateBpm');
+        const startEl = lap.getAttribute('StartTime');
+
+        const totalSec = totalTimeEl ? parseFloat(totalTimeEl.textContent) : null;
+        const distMeters = distEl ? parseFloat(distEl.textContent) : null;
+        const avgHr = hrEl ? (() => {
+          const v = hrEl.getElementsByTagNameNS(ns, 'Value')[0] || hrEl.querySelector('Value');
+          return v ? parseInt(v.textContent) : null;
+        })() : null;
+        const date = startEl ? startEl.slice(0, 10) : todayStr();
+
+        if (!totalSec || !distMeters) {
+          st.textContent = '❌ ไม่พบระยะทางหรือเวลาในไฟล์ TCX';
+          input.value = ''; return;
+        }
+
+        const distKm = Math.round(distMeters / 10) / 100; // meters → km, 2 decimals
+        const durMin = Math.round(totalSec / 0.6) / 100;   // seconds → decimal minutes, 2 decimals
+        const paceMin = totalSec / 60 / distKm;
+        const paceM = Math.floor(paceMin);
+        const paceS = Math.round((paceMin - paceM) * 60);
+
+        // Determine type — TCX from treadmill often has Sport="Other"
+        const activityEl = lap.parentNode;
+        const sport = (activityEl && activityEl.getAttribute('Sport')) || '';
+
+        // Auto-fill form
+        if (date) document.getElementById('c-date').value = date;
+        document.getElementById('c-dist').value = distKm;
+        document.getElementById('c-dur').value = durMin;
+        if (avgHr) document.getElementById('c-hr').value = avgHr;
+        document.getElementById('c-notes').value = `Imported from TCX${sport ? ' · ' + sport : ''}`;
+
+        // Guess type from distance/time
+        const typeSel = document.getElementById('c-type');
+        const avgSpeed = distKm / (durMin / 60);
+        if (avgSpeed < 5) typeSel.value = 'เดิน';
+        else if (avgSpeed < 8) typeSel.value = 'เดิน/วิ่งปน (Fartlek)';
+        else typeSel.value = 'วิ่ง';
+
+        st.textContent = `✅ อ่าน TCX สำเร็จ: ${distKm}km · ${fmtDuration(durMin)} · Pace ${paceM}:${String(paceS).padStart(2,'0')}/km${avgHr ? ' · HR ' + avgHr : ''} — ตรวจสอบและกดบันทึก`;
+      } catch (e) {
+        st.textContent = `❌ เกิดข้อผิดพลาด: ${e.message}`;
+      }
+      input.value = '';
+    };
+    reader.onerror = function() {
+      st.textContent = '❌ ไม่สามารถอ่านไฟล์ได้';
+      input.value = '';
+    };
+    reader.readAsText(file);
   }
 
   function addCardio() {
