@@ -700,7 +700,7 @@
     async set(k, v) { localStorage.setItem(k, v); },
     async delete(k) { localStorage.removeItem(k); }
   };
-  let state = { profile: null, cardio: [], gym: [], food: [], cycle: null, eatingSeq: [false, false, false, false] };
+  let state = { profile: null, cardio: [], gym: [], food: [], cycle: null, eatingSeq: [false, false, false, false], weightLog: [] };
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
   // Empty first-run defaults — user fills these in on the Settings tab.
@@ -739,6 +739,7 @@
     try { const r = await S.get('food-logs'); state.food = r ? JSON.parse(r.value) : []; } catch (e) { state.food = []; }
     try { const r = await S.get('cycle-settings'); state.cycle = r ? JSON.parse(r.value) : defaults.cycle; } catch (e) { state.cycle = defaults.cycle; }
     try { const r = await S.get('eating-seq'); state.eatingSeq = r ? JSON.parse(r.value) : [false, false, false, false]; } catch (e) { state.eatingSeq = [false, false, false, false]; }
+    try { const r = await S.get('weight-log'); state.weightLog = r ? JSON.parse(r.value) : []; } catch (e) { state.weightLog = []; }
     await loadChatHistory();
   }
 
@@ -903,6 +904,21 @@
     if (items[idx]) items[idx].classList.toggle('done', state.eatingSeq[idx]);
   }
 
+  function quickLogWeight() {
+    const val = parseFloat(document.getElementById('w-quick').value);
+    if (!val || isNaN(val)) { toast('กรุณาใส่น้ำหนักให้ถูกต้อง'); return; }
+    state.profile.currentWeight = val;
+    save('profile', state.profile);
+    const today = todayStr();
+    const idx = state.weightLog.findIndex(e => e.date === today);
+    const entry = { date: today, weight: val };
+    if (idx >= 0) state.weightLog[idx] = entry;
+    else state.weightLog.push(entry);
+    save('weight-log', state.weightLog);
+    toast('⚡ บันทึกน้ำหนักแล้ว!');
+    renderOverview();
+  }
+
   // ---------- render: overview ----------
   function renderOverview() {
     const info = cycleInfo();
@@ -957,12 +973,27 @@
     <!-- Weight Progress Card -->
     <div class="card">
       <h2>น้ำหนักเป้าหมาย${state.profile.weightGoal ? ` (เป้า ${state.profile.weightGoal} kg)` : ''}</h2>
-      <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
         <div>
           <span style="font-family:var(--font-mono);font-size:18px;font-weight:700;">${state.profile.currentWeight ? state.profile.currentWeight + ' kg' : 'ยังไม่ได้ตั้งค่า'}</span>
           ${state.profile.currentWeight && state.profile.weightGoal ? `<span style="font-size:11px;color:var(--text-dim);"> → ขาดอีก ${(state.profile.currentWeight - state.profile.weightGoal).toFixed(1)} kg</span>` : ''}
         </div>
         <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-dim);">เดดไลน์: ${fmtDate(state.profile.deadline)}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:4px;">
+        <div style="flex:1;">
+          <div class="inc-group">
+            <button class="inc-btn" onclick="stepVal('w-quick',-0.5)">-</button>
+            <input type="number" step="0.1" id="w-quick" value="${(() => {
+              const todayEntry = state.weightLog.find(e => e.date === todayStr());
+              if (todayEntry) return todayEntry.weight;
+              if (state.weightLog.length) return state.weightLog.slice(-1)[0].weight;
+              return state.profile.currentWeight ?? '';
+            })()}">
+            <button class="inc-btn" onclick="stepVal('w-quick',0.5)">+</button>
+          </div>
+        </div>
+        <button class="ghost" style="flex-shrink:0;" onclick="quickLogWeight()">บันทึก</button>
       </div>
     </div>
 
@@ -1130,7 +1161,7 @@
   ถ้าอ่านค่าไหนไม่ได้ ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
 
       const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-      const result = await callGemini('gemini-2.5-flash-lite', contents, null);
+      const result = await callGemini('gemini-3.1-flash-lite', contents, null);
 
       if (result.error) {
         st.textContent = `❌ ${result.error}`;
@@ -1526,6 +1557,7 @@
   }
 
   function saveProfile() {
+    const oldWeight = state.profile.currentWeight;
     state.profile.currentWeight = parseFloat(document.getElementById('p-curr').value) || state.profile.currentWeight;
     state.profile.weightGoal = parseFloat(document.getElementById('p-goal').value) || state.profile.weightGoal;
     state.profile.deadline = document.getElementById('p-deadline').value;
@@ -1533,6 +1565,17 @@
     state.profile.calorieTarget = parseInt(document.getElementById('p-cal').value) || state.profile.calorieTarget;
     state.profile.proteinTarget = parseInt(document.getElementById('p-protein').value) || state.profile.proteinTarget;
     save('profile', state.profile);
+
+    // Auto-append weight log if weight changed
+    if (state.profile.currentWeight && state.profile.currentWeight !== oldWeight) {
+      const today = todayStr();
+      const idx = state.weightLog.findIndex(e => e.date === today);
+      const entry = { date: today, weight: state.profile.currentWeight };
+      if (idx >= 0) state.weightLog[idx] = entry;
+      else state.weightLog.push(entry);
+      save('weight-log', state.weightLog);
+    }
+
     toast('บันทึกการปรับปรุงเป้าหมายสำเร็จ');
   }
 
@@ -1545,7 +1588,7 @@
 
   function exportAllData() {
     const data = {};
-    for (const k of ['profile','cardio-logs','gym-logs','food-logs','cycle-settings','eating-seq','coach-chats']) {
+    for (const k of ['profile','cardio-logs','gym-logs','food-logs','cycle-settings','eating-seq','coach-chats','weight-log']) {
       const v = localStorage.getItem(k);
       if (v !== null) data[k] = JSON.parse(v);
     }
@@ -1564,7 +1607,7 @@
     reader.onload = function() {
       try {
         const data = JSON.parse(reader.result);
-        const validKeys = ['profile','cardio-logs','gym-logs','food-logs','cycle-settings','eating-seq','coach-chats'];
+        const validKeys = ['profile','cardio-logs','gym-logs','food-logs','cycle-settings','eating-seq','coach-chats','weight-log'];
         const keys = Object.keys(data).filter(k => validKeys.includes(k));
         if (!keys.length) { toast('ไม่พบข้อมูลที่ถูกต้องในไฟล์'); return; }
         if (!confirm(`พบข้อมูล ${keys.length} รายการ (${keys.join(', ')})\n\nต้องการเขียนทับข้อมูลปัจจุบันหรือไม่?`)) return;
@@ -1582,7 +1625,7 @@
 
   async function resetAll() {
     if (!confirm('ล้างข้อมูลทั้งหมด? การกระทำนี้ไม่สามารถย้อนคืนได้')) return;
-    for (const k of ['profile', 'cardio-logs', 'gym-logs', 'food-logs', 'cycle-settings', 'eating-seq', 'coach-chats', 'gemini-keys']) {
+    for (const k of ['profile', 'cardio-logs', 'gym-logs', 'food-logs', 'cycle-settings', 'eating-seq', 'coach-chats', 'gemini-keys', 'weight-log']) {
       try { await S.delete(k); } catch (e) { }
     }
     await loadAll();
@@ -1672,6 +1715,49 @@
     const weekGym = state.gym.filter(g => g.date >= weekAgo).length;
     const weekFoodEntries = state.food.filter(f => f.date >= weekAgo);
 
+    // 4-week trends
+    const weekRange = (weeksAgo) => {
+      const end = new Date(Date.now() - (weeksAgo - 1) * 7 * 86400000).toISOString().slice(0, 10);
+      const start = new Date(Date.now() - weeksAgo * 7 * 86400000).toISOString().slice(0, 10);
+      return { start, end };
+    };
+
+    const weeks = [1, 2, 3, 4].map(w => {
+      const { start, end } = weekRange(w);
+      const gymCount = state.gym.filter(g => g.date >= start && g.date <= end).length;
+      const cardioCount = state.cardio.filter(c => c.date >= start && c.date <= end).length;
+      const foodEntries = state.food.filter(f => f.date >= start && f.date <= end);
+      const days = new Set(foodEntries.map(f => f.date)).size;
+      const avgCals = days > 0 ? Math.round(foodEntries.reduce((s, f) => s + Number(f.calories || 0), 0) / days) : 0;
+      const avgProtein = days > 0 ? Math.round(foodEntries.reduce((s, f) => s + Number(f.protein || 0), 0) / days) : 0;
+      return { w, gymCount, cardioCount, foodCount: foodEntries.length, avgCals, avgProtein };
+    });
+
+    const trendLines = weeks.map(wk => `  - สัปดาห์ที่ ${wk.w}: ยิม ${wk.gymCount} ครั้ง / คาร์ดิโอ ${wk.cardioCount} ครั้ง / อาหาร ${wk.foodCount} มื้อ (เฉลี่ย ${wk.avgCals} kcal, โปรตีน ${wk.avgProtein}g/วัน)`).join('\n');
+
+    // Weight at 7/14/30d ago
+    const findClosestWeight = (daysAgo) => {
+      const target = new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10);
+      const sorted = [...state.weightLog].sort((a, b) => b.date.localeCompare(a.date));
+      const closest = sorted.find(e => e.date <= target);
+      return closest ? `${closest.weight} kg (${fmtDate(closest.date)})` : '—';
+    };
+
+    const w7d = findClosestWeight(7);
+    const w14d = findClosestWeight(14);
+    const w30d = findClosestWeight(30);
+
+    // Deadline pacing
+    let pacingText = '';
+    if (p.deadline && p.currentWeight && p.weightGoal) {
+      const daysRemaining = daysBetween(today, p.deadline);
+      const kgRemaining = p.currentWeight - p.weightGoal;
+      const requiredRate = daysRemaining > 0 ? (kgRemaining / daysRemaining * 7).toFixed(2) : 0;
+      const w30Entry = [...state.weightLog].sort((a, b) => b.date.localeCompare(a.date)).find(e => e.date <= new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
+      const actualRate = w30Entry ? ((w30Entry.weight - p.currentWeight) / 30 * 7).toFixed(2) : '—';
+      pacingText = `\nความก้าวหน้าเป้าหมาย:\n  - วันที่เหลือ: ${daysRemaining} วัน\n  - กิโลที่ต้องลด: ${kgRemaining.toFixed(1)} kg\n  - อัตราที่ต้องทำ: ${requiredRate} kg/สัปดาห์\n  - อัตราจริง (30 วันล่าสุด): ${actualRate} kg/สัปดาห์`;
+    }
+
     return `คุณคือโค้ชซ้อมส่วนตัวของผู้ใช้คนนี้ ช่วยตอบคำถามและให้คำแนะนำการซ้อม อาหาร และรอบเดือน
 
   ข้อมูลผู้ใช้:
@@ -1696,6 +1782,12 @@
   - คาร์ดิโอ ${weekCardio} ครั้ง
   - ยิม ${weekGym} ครั้ง
   - จดอาหาร ${weekFoodEntries.length} มื้อ
+
+  แนวโน้ม 4 สัปดาห์:
+${trendLines}
+  - น้ำหนัก 7 วันที่แล้ว: ${w7d}
+  - น้ำหนัก 14 วันที่แล้ว: ${w14d}
+  - น้ำหนัก 30 วันที่แล้ว: ${w30d}${pacingText}
 
   สำคัญ:
   1. เป้าหมายแคลอรี่ ${p.calorieTarget || '—'} เทียบกับ TDEE ${p.tdee || '—'} คือการตัดแคลอรี่ที่สูง — ถ้าผู้ใช้บันทึกแคลอรี่ไม่ครบ ให้ระวังว่าตัวเลขอาจต่ำกว่าความจริง
@@ -1771,7 +1863,7 @@
       }
     }
 
-    const result = await callGemini('gemini-2.5-flash', contents, systemPrompt);
+    const result = await callGemini('gemini-3.1-flash-lite', contents, systemPrompt);
     hideTyping();
 
     if (result.error) {
@@ -1790,7 +1882,7 @@
     const systemPrompt = buildCoachSystemPrompt();
     const contents = [{ role: 'user', parts: [{ text: 'ช่วยวิเคราะห์ข้อมูลของฉันวันนี้และแนะนำสิ่งที่ควรทำวันนี้หน่อย — พูดสั้นๆ 1-2 ประโยค เป็นภาษาไทย' }] }];
 
-    const result = await callGemini('gemini-2.5-flash', contents, systemPrompt);
+    const result = await callGemini('gemini-3.1-flash-lite', contents, systemPrompt);
     coachTyping = false;
 
     if (result.text) {
