@@ -740,6 +740,25 @@
     if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
     return `${m}:${String(s).padStart(2,'0')}`;
   };
+  // Parse "MM:SS" or "H:MM:SS" to decimal minutes; also handles plain numbers
+  function parseDuration(str) {
+    if (!str || !str.trim()) return null;
+    const t = str.trim();
+    if (/^\d+(\.\d+)?$/.test(t)) return parseFloat(t); // plain number = minutes
+    const parts = t.split(':').map(Number);
+    if (parts.length === 2) return parts[0] + parts[1] / 60;
+    if (parts.length === 3) return parts[0] * 60 + parts[1] + parts[2] / 60;
+    return null;
+  }
+  // Step MM:SS duration text input by +/- minutes
+  function stepDuration(id, minStep) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    let val = parseDuration(el.value) || 0;
+    val = Math.max(0, val + minStep);
+    el.value = fmtDuration(val);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
 
   async function loadAll() {
     try { const r = await S.get('profile'); state.profile = r ? JSON.parse(r.value) : defaults.profile; } catch (e) { state.profile = defaults.profile; }
@@ -1031,7 +1050,7 @@
     const p = cardioPresets[idx];
     document.getElementById('c-type').value = p.type;
     document.getElementById('c-dist').value = p.dist;
-    document.getElementById('c-dur').value = p.dur;
+    document.getElementById('c-dur').value = fmtDuration(p.dur);
     document.getElementById('c-hr').value = p.hr;
     document.getElementById('c-rpe').value = p.rpe;
     document.getElementById('c-notes').value = p.note;
@@ -1063,11 +1082,11 @@
           </div>
         </div>
         <div>
-          <label>เวลา (นาที)</label>
+          <label>เวลา (MM:SS)</label>
           <div class="inc-group">
-            <button class="inc-btn" onclick="stepVal('c-dur',-5)">-</button>
-            <input type="number" id="c-dur" placeholder="45">
-            <button class="inc-btn" onclick="stepVal('c-dur',5)">+</button>
+            <button class="inc-btn" onclick="stepDuration('c-dur',-5)">-5m</button>
+            <input type="text" id="c-dur" placeholder="45:00" inputmode="numeric" style="text-align:center;">
+            <button class="inc-btn" onclick="stepDuration('c-dur',5)">+5m</button>
           </div>
         </div>
       </div>
@@ -1207,7 +1226,7 @@
         if (match) sel.value = match;
       }
       if (json.distanceKm) document.getElementById('c-dist').value = json.distanceKm;
-      if (json.durationMin) document.getElementById('c-dur').value = json.durationMin;
+      if (json.durationMin) document.getElementById('c-dur').value = fmtDuration(json.durationMin);
       if (json.avgHr) document.getElementById('c-hr').value = json.avgHr;
       if (json.rpe) document.getElementById('c-rpe').value = json.rpe;
       if (json.notes) document.getElementById('c-notes').value = json.notes;
@@ -1279,7 +1298,7 @@
         // Auto-fill form
         if (date) document.getElementById('c-date').value = date;
         document.getElementById('c-dist').value = distKm;
-        document.getElementById('c-dur').value = durMin;
+        document.getElementById('c-dur').value = fmtDuration(durMin);
         if (avgHr) document.getElementById('c-hr').value = avgHr;
         document.getElementById('c-notes').value = `Imported from TCX${sport ? ' · ' + sport : ''}`;
 
@@ -1305,7 +1324,7 @@
 
   function addCardio() {
     const dist = parseFloat(document.getElementById('c-dist').value);
-    const dur = parseFloat(document.getElementById('c-dur').value);
+    const dur = parseDuration(document.getElementById('c-dur').value);
     if (!dist || !dur) { toast('กรุณากรอกระยะทางและระยะเวลา'); return; }
     const paceMin = dur / dist;
     const m = Math.floor(paceMin); const s = Math.round((paceMin - m) * 60);
