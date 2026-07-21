@@ -1149,19 +1149,27 @@
       canvas.getContext('2d').drawImage(img, 0, 0, w, h);
       const base64 = canvas.toDataURL('image/jpeg', 0.8);
 
-      const prompt = `วิเคราะห์รูปภาพนี้ — มันคือภาพหน้าจอ Strava หรือหน้าจอลู่วิ่ง แยกข้อมูลต่อไปนี้แล้วตอบเป็น JSON เท่านั้น (ห้ามตอบอย่างอื่น):
-  {
-    "type": "เดิน/วิ่งปน (Fartlek)" หรือ "วิ่ง" หรือ "เดิน" หรือ "เดินขึ้นเนิน/ชัน",
-    "distanceKm": ตัวเลข (km),
-    "durationMin": ตัวเลข (นาที),
-    "avgHr": ตัวเลข หรือ null,
-    "rpe": ตัวเลข 1-10 หรือ null,
-    "notes": "ข้อความสั้นๆ จากในรูป หรือ null"
-  }
-  ถ้าอ่านค่าไหนไม่ได้ ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
+      const prompt = `วิเคราะห์รูปภาพนี้ — มันคือภาพหน้าจอ Strava/แอพวิ่ง หรือหน้าจอลู่วิ่ง (Fairtex/Technogym/etc.)
+
+ข้อมูลที่ควรอ่าน:
+- Strava: look for "Moving Time" (durationMin), "Distance" (km), "Avg HR", "Avg Pace", "Elev Gain"
+- Treadmill LCD: look for TIME (durationMin), DIST (km), SPEED, CAL, INCL (incline level → ถ้าเห็น INCL L20 = เดินขึ้นเนิน)
+- ถ้ามีเวลา + pace แต่ไม่มีระยะทาง → คำนวณ distanceKm = durationMin / (paceMinPerKm)
+  เช่น 79.85 นาที pace 10:24/km → 79.85 / 10.4 = 7.68 km
+
+ตอบเป็น JSON เท่านั้น (ห้ามตอบอย่างอื่น):
+{
+  "type": "เดิน/วิ่งปน (Fartlek)" หรือ "วิ่ง" หรือ "เดิน" หรือ "เดินขึ้นเนิน/ชัน",
+  "distanceKm": ตัวเลข (km),
+  "durationMin": ตัวเลข (นาที) — แปลง MM:SS เป็นนาทีทศนิยม เช่น 53:57 = 53.95,
+  "avgHr": ตัวเลข (bpm) หรือ null,
+  "rpe": ตัวเลข 1-10 หรือ null ถ้าไม่มีในรูป,
+  "notes": "ข้อมูลเพิ่มเติมจากรูป เช่น incline level, calories, pace เฉลี่ย หรือ null"
+}
+ถ้าอ่านค่าไหนไม่ได้ ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
 
       const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-      const result = await callGemini('gemini-3.1-flash-lite', contents, null);
+      const result = await callGemini('gemini-3.1-flash-lite', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
 
       if (result.error) {
         st.textContent = `❌ ${result.error}`;
@@ -1661,14 +1669,14 @@
     }
   }
 
-  async function callGemini(model, contents, systemInstruction) {
+  async function callGemini(model, contents, systemInstruction, genConfig = {}) {
     const keys = geminiKeys();
     if (!keys.length) return { error: 'ยังไม่ได้ตั้งค่า API Key — ไปที่แท็บ Config แล้วใส่ Gemini API Key' };
 
     let lastError = '';
     for (let attempt = 0; attempt < keys.length; attempt++) {
       const key = keys[attempt];
-      const body = { contents, generationConfig: { temperature: 0.7, maxOutputTokens: 1024 } };
+      const body = { contents, generationConfig: { temperature: genConfig.temperature ?? 0.7, maxOutputTokens: genConfig.maxOutputTokens ?? 1024 } };
       if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
 
       try {
