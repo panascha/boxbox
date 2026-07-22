@@ -16,6 +16,8 @@
 <meta name="apple-mobile-web-app-title" content="ซ้อม">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link
   href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Noto+Sans+Thai:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
@@ -527,6 +529,56 @@
     padding: 30px;
   }
 
+  .photo-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100dvh;
+    background: rgba(26, 32, 44, 0.8);
+    z-index: 9999;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .photo-overlay.active {
+    display: flex;
+  }
+
+  .spinner {
+    width: 40px;
+    height: 40px;
+    border: 4px solid var(--line);
+    border-top-color: var(--moss);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .photo-preview {
+    display: none;
+    margin: 12px 0;
+    border-radius: 8px;
+    overflow: hidden;
+    max-width: 100%;
+  }
+
+  .photo-preview.active {
+    display: block;
+  }
+
+  .photo-preview img {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+
   /* Coach Chat */
   .chat-wrap {
     display: flex;
@@ -566,6 +618,34 @@
     background: var(--surface-raised);
     border: 1px solid var(--line);
     border-bottom-left-radius: 4px;
+    white-space: normal;
+    max-width: 92%;
+  }
+
+  /* Notion-like document formatting for bot markdown */
+  .chat-msg.bot p { margin: 0 0 8px; }
+  .chat-msg.bot p:last-child { margin-bottom: 0; }
+  .chat-msg.bot strong { font-weight: 700; color: var(--text); }
+  .chat-msg.bot ul {
+    margin: 4px 0 8px;
+    padding-left: 18px;
+    list-style: none;
+  }
+  .chat-msg.bot ul:last-child { margin-bottom: 0; }
+  .chat-msg.bot li {
+    position: relative;
+    margin-bottom: 4px;
+    line-height: 1.5;
+  }
+  .chat-msg.bot li::before {
+    content: '';
+    position: absolute;
+    left: -13px;
+    top: 8px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--moss);
   }
 
   .chat-input-row {
@@ -630,6 +710,16 @@
     padding: 40px 16px;
     line-height: 1.6;
   }
+
+  /* sync status */
+  .sdot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; vertical-align:middle; }
+  .sdot.on  { background:var(--moss); }
+  .sdot.sync{ background:var(--moss); animation:dspin 0.6s ease-in-out infinite; }
+  .sdot.off { background:var(--text-dim); }
+  .sdot.err { background:var(--danger); }
+  @keyframes dspin { 50%{transform:scale(0.4);} }
+  .sync-status { font-size:11px; color:var(--text-dim); line-height:1.8; }
+  .sync-btn-row { display:flex; gap:6px; margin-top:8px; }
 </style>
 </head>
 
@@ -668,23 +758,6 @@
       </svg>โค้ช</button>
   </div>
 
-  <!-- Quick Log Area for Lazy People (Stays sticky on Home) -->
-  <div id="quick-actions-bar" style="display: block;">
-    <div class="quick-grid">
-      <button class="btn-quick" onclick="quickLogCardio()">
-        <span style="color:var(--moss); font-weight:700;">🏃 Zone 2</span>
-        <span class="sub">45 นาที (Fartlek)</span>
-      </button>
-      <button class="btn-quick" onclick="quickLogGym()">
-        <span style="color:var(--ember); font-weight:700;">🏋️ ยิมอก+หลัง</span>
-        <span class="sub">3 ท่าหลัก</span>
-      </button>
-      <button class="btn-quick" onclick="quickLogFood()">
-        <span style="color:var(--rose); font-weight:700;">🍱 มื้อหลัก</span>
-        <span class="sub">700kcal · โปร 50g</span>
-      </button>
-    </div>
-  </div>
 
   <div id="content">
     <div class="loading">กำลังโหลดข้อมูล...</div>
@@ -694,35 +767,227 @@
 <div class="toast" id="toast"></div>
 
 <script>
-  // localStorage shim — keeps the { value } shape the rest of this file expects.
-  const S = {
-    async get(k) { const v = localStorage.getItem(k); return v === null ? null : { value: v }; },
-    async set(k, v) { localStorage.setItem(k, v); },
-    async delete(k) { localStorage.removeItem(k); }
+  // ───────── data store ─────────
+  // Single choke point for all persistence. Every read/write/delete flows through here.
+  const TABLES = ['profile','cardio-logs','gym-logs','food-logs','cycle-settings','eating-seq','weight-log','coach-chats','gemini-keys'];
+  const DEFAULTS = {
+    'profile':       { name:'', age:null, height:null, weightGoal:null, currentWeight:null, deadline:'', tdee:null, calorieTarget:null, proteinTarget:null },
+    'cardio-logs':   [],
+    'gym-logs':      [],
+    'food-logs':     [],
+    'cycle-settings':{ cycleLength:28, periodLength:5, starts:[] },
+    'eating-seq':    [false, false, false, false],
+    'weight-log':    [],
+    'coach-chats':   [],
+    'gemini-keys':   []
   };
-  let state = { profile: null, cardio: [], gym: [], food: [], cycle: null, eatingSeq: [false, false, false, false], weightLog: [] };
-  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
-  // Empty first-run defaults — user fills these in on the Settings tab.
-  const defaults = {
-    profile: {
-      name: '',
-      age: null,
-      height: null,
-      weightGoal: null,
-      currentWeight: null,
-      deadline: '',
-      tdee: null,
-      calorieTarget: null,
-      proteinTarget: null
+  const dataStore = {
+    // Get parsed JSON, or default if missing
+    get(k) {
+      const raw = localStorage.getItem(k);
+      if (raw === null) return DEFAULTS[k] !== undefined ? DEFAULTS[k] : null;
+      try { return JSON.parse(raw); } catch(e) { return DEFAULTS[k] !== undefined ? DEFAULTS[k] : null; }
     },
-    cycle: {
-      cycleLength: 28,
-      periodLength: 5,
-      starts: []
+
+    // Persist + write _mtime
+    set(k, val) {
+      localStorage.setItem(k, JSON.stringify(val));
+      localStorage.setItem('_mtime:' + k, String(Date.now()));
+    },
+
+    // Delete key + its mtime
+    remove(k) {
+      localStorage.removeItem(k);
+      localStorage.removeItem('_mtime:' + k);
+    },
+
+    // Modification timestamp (epoch ms), 0 if never written
+    mtime(k) {
+      const v = localStorage.getItem('_mtime:' + k);
+      return v ? parseInt(v, 10) : 0;
+    },
+
+    // Build full export object (excludes gemini-keys — never backed up)
+    exportAll() {
+      const SKIP = ['gemini-keys'];
+      const tables = {};
+      for (const k of TABLES) {
+        if (SKIP.includes(k)) continue;
+        const raw = localStorage.getItem(k);
+        if (raw !== null) tables[k] = JSON.parse(raw);
+      }
+      const mtimes = {};
+      for (const k of TABLES) {
+        if (SKIP.includes(k)) continue;
+        const mt = this.mtime(k);
+        if (mt) mtimes[k] = mt;
+      }
+      return { exportedAt: new Date().toISOString(), _mtimes: mtimes, tables };
+    },
+
+    // Import — if merge=true, only upgrade per-table where cloud mtime > local
+    importAll(data, merge) {
+      if (!data || !data.tables) throw new Error('Invalid backup format');
+      for (const k of Object.keys(data.tables)) {
+        if (!TABLES.includes(k) || k === 'gemini-keys') continue;
+        if (merge) {
+          const cloudMtime = (data._mtimes && data._mtimes[k]) || 0;
+          const localMtime = this.mtime(k);
+          if (cloudMtime > localMtime) {
+            localStorage.setItem(k, JSON.stringify(data.tables[k]));
+            if (cloudMtime) localStorage.setItem('_mtime:' + k, String(cloudMtime));
+          }
+        } else {
+          localStorage.setItem(k, JSON.stringify(data.tables[k]));
+          const mt = (data._mtimes && data._mtimes[k]) || Date.now();
+          localStorage.setItem('_mtime:' + k, String(mt));
+        }
+      }
     }
   };
 
+  // ───────── sync engine (Google Drive) ─────────
+  const syncDrive = {
+    status: 'idle',
+    connected: false,
+    lastSync: localStorage.getItem('_lastSync') || null,
+    token: null,
+    tokenExpiry: 0,
+    userEmail: '',
+    fileId: null,
+    _debounce: null,
+
+    clientId() {
+      return localStorage.getItem('_drive_client_id') || '';
+    },
+
+    enqueue() {
+      if (!this.connected || !this.token) return;
+      clearTimeout(this._debounce);
+      this._debounce = setTimeout(() => this.push(), 3000);
+    },
+
+    async connect() {
+      if (typeof google === 'undefined' || typeof google.accounts === 'undefined') {
+        toast('Google Identity Services ยังไม่พร้อม — รอสักครู่แล้วลองใหม่');
+        return;
+      }
+      const cid = this.clientId();
+      if (!cid) { toast('กรุณาใส่ Google OAuth Client ID ก่อนเชื่อมต่อ'); return; }
+      return new Promise((resolve) => {
+        const client = google.accounts.oauth2.initTokenClient({
+          client_id: cid,
+          scope: 'https://www.googleapis.com/auth/drive.file',
+          callback: async (resp) => {
+            if (resp.error) { this.status = 'error'; toast('เชื่อมต่อไม่สำเร็จ: ' + resp.error); resolve(); return; }
+            this.token = resp.access_token;
+            this.tokenExpiry = Date.now() + (resp.expires_in || 3600) * 1000;
+            this.connected = true;
+            this.status = 'online';
+            try {
+              const ui = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: `Bearer ${this.token}` }}).then(r=>r.json());
+              this.userEmail = ui.email || '';
+            } catch(e) {}
+            await this._findOrCreate();
+            await this.pull();
+            toast('เชื่อมต่อ Google Drive สำเร็จ' + (this.userEmail ? ` (${this.userEmail})` : ''));
+            renderSettings();
+            resolve();
+          }
+        });
+        client.requestAccessToken({ prompt: '' });
+      });
+    },
+
+    disconnect() {
+      this.token = null; this.tokenExpiry = 0; this.connected = false;
+      this.fileId = null; this.userEmail = ''; this.status = 'idle';
+      clearTimeout(this._debounce);
+      renderSettings();
+    },
+
+    async _ensure() {
+      if (this.token && Date.now() < this.tokenExpiry - 60000) return true;
+      try { await this.connect(); return this.connected; } catch(e) { return false; }
+    },
+
+    async _findOrCreate() {
+      const q = await fetch("https://www.googleapis.com/drive/v3/files?q=name='boxbox-backup.json'&spaces=drive&fields=files(id,name)", {
+        headers: { Authorization: `Bearer ${this.token}` }
+      }).then(r=>r.json());
+      if (q.files && q.files.length) { this.fileId = q.files[0].id; return; }
+      const meta = { name:'boxbox-backup.json', mimeType:'application/json' };
+      const fd = new FormData();
+      fd.append('metadata', new Blob([JSON.stringify(meta)],{type:'application/json'}));
+      fd.append('file', new Blob([JSON.stringify(dataStore.exportAll())],{type:'application/json'}));
+      const c = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+        method:'POST', headers:{Authorization:`Bearer ${this.token}`}, body:fd
+      }).then(r=>r.json());
+      this.fileId = c.id;
+    },
+
+    async push() {
+      if (!this.connected || !this.fileId) return;
+      if (!(await this._ensure())) return;
+      this.status = 'syncing'; renderSettings();
+      try {
+        const meta = { name:'boxbox-backup.json', mimeType:'application/json' };
+        const fd = new FormData();
+        fd.append('metadata', new Blob([JSON.stringify(meta)],{type:'application/json'}));
+        fd.append('file', new Blob([JSON.stringify(dataStore.exportAll())],{type:'application/json'}));
+        await fetch(`https://www.googleapis.com/upload/drive/v3/files/${this.fileId}?uploadType=multipart`, {
+          method:'PATCH', headers:{Authorization:`Bearer ${this.token}`}, body:fd
+        });
+        this.lastSync = new Date().toISOString(); localStorage.setItem('_lastSync', this.lastSync);
+        this.status = 'online';
+      } catch(e) { this.status = navigator.onLine ? 'error' : 'offline'; }
+      renderSettings();
+    },
+
+    async pull() {
+      if (!this.connected || !this.fileId) return;
+      if (!(await this._ensure())) return;
+      this.status = 'syncing'; renderSettings();
+      try {
+        const r = await fetch(`https://www.googleapis.com/drive/v3/files/${this.fileId}?alt=media`, {
+          headers:{Authorization:`Bearer ${this.token}`}
+        });
+        if (!r.ok) throw new Error('Download failed');
+        const data = await r.json();
+        dataStore.importAll(data, true);
+        await loadAll();
+        this.lastSync = new Date().toISOString(); localStorage.setItem('_lastSync', this.lastSync);
+        this.status = 'online';
+        route('overview');
+        toast('ดึงข้อมูลจาก Drive สำเร็จ');
+      } catch(e) { this.status = navigator.onLine ? 'error' : 'offline'; }
+      renderSettings();
+    },
+
+    renderStatus() {
+      if (!this.connected) return '';
+      const d = { online:'<span class="sdot on"></span>', syncing:'<span class="sdot sync"></span>', offline:'<span class="sdot off"></span>', error:'<span class="sdot err"></span>', idle:'<span class="sdot off"></span>' };
+      const lbl = { online:'synced', syncing:'กำลัง sync…', offline:'offline', error:'error', idle:'ยังไม่ได้ sync' };
+      const t = this.lastSync ? ' · ' + new Date(this.lastSync).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}) : '';
+      return `${d[this.status]||d.idle} ${lbl[this.status]||''}${t}`;
+    }
+  };
+
+  // Wire dataStore.set → auto-enqueue sync
+  const _dsSet = dataStore.set;
+  dataStore.set = function(k, val) { _dsSet.call(dataStore, k, val); if (navigator.onLine) syncDrive.enqueue(); };
+
+  window.addEventListener('online', () => { if (syncDrive.connected) { syncDrive.status='online'; syncDrive.push(); } });
+  window.addEventListener('offline', () => { if (syncDrive.connected) syncDrive.status = 'offline'; });
+  let state = { profile: null, cardio: [], gym: [], food: [], cycle: null, eatingSeq: [false, false, false, false], weightLog: [] };
+
+  function save(key, val) {
+    try { dataStore.set(key, val); } catch (e) { toast('บันทึกไม่สำเร็จ ลองใหม่'); }
+  }
+  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+  // Empty first-run defaults — user fills these in on the Settings tab.
   function toast(msg) {
     const t = document.getElementById('toast');
     t.textContent = msg; t.classList.add('show');
@@ -761,19 +1026,14 @@
   }
 
   async function loadAll() {
-    try { const r = await S.get('profile'); state.profile = r ? JSON.parse(r.value) : defaults.profile; } catch (e) { state.profile = defaults.profile; }
-    try { const r = await S.get('cardio-logs'); state.cardio = r ? JSON.parse(r.value) : []; } catch (e) { state.cardio = []; }
-    try { const r = await S.get('gym-logs'); state.gym = r ? JSON.parse(r.value) : []; } catch (e) { state.gym = []; }
-    try { const r = await S.get('food-logs'); state.food = r ? JSON.parse(r.value) : []; } catch (e) { state.food = []; }
-    try { const r = await S.get('cycle-settings'); state.cycle = r ? JSON.parse(r.value) : defaults.cycle; } catch (e) { state.cycle = defaults.cycle; }
-    try { const r = await S.get('eating-seq'); state.eatingSeq = r ? JSON.parse(r.value) : [false, false, false, false]; } catch (e) { state.eatingSeq = [false, false, false, false]; }
-    try { const r = await S.get('weight-log'); state.weightLog = r ? JSON.parse(r.value) : []; } catch (e) { state.weightLog = []; }
+    state.profile      = dataStore.get('profile');
+    state.cardio       = dataStore.get('cardio-logs');
+    state.gym          = dataStore.get('gym-logs');
+    state.food         = dataStore.get('food-logs');
+    state.cycle        = dataStore.get('cycle-settings');
+    state.eatingSeq    = dataStore.get('eating-seq');
+    state.weightLog    = dataStore.get('weight-log');
     await loadChatHistory();
-  }
-
-  async function save(key, val) {
-    try { await S.set(key, JSON.stringify(val)); }
-    catch (e) { toast('บันทึกไม่สำเร็จ ลองใหม่'); }
   }
 
   // Helper to increment/decrement input values cleanly
@@ -789,7 +1049,7 @@
   // Dynamic cycle status math
   function daysBetween(a, b) { return Math.floor((new Date(b) - new Date(a)) / 86400000); }
   function cycleInfo() {
-    const c = state.cycle || defaults.cycle;
+    const c = state.cycle || DEFAULTS['cycle-settings'];
     const starts = [...c.starts].sort();
     const lastStart = starts[starts.length - 1];
     if (!lastStart) {
@@ -878,51 +1138,6 @@
   }
 
   // 1-Click Fast Log Triggers
-  function quickLogCardio() {
-    const entry = {
-      id: uid(), date: todayStr(),
-      type: 'เดิน/วิ่งปน (Fartlek)',
-      distanceKm: 4.5, durationMin: 45,
-      pace: '10:00', avgHr: 130, rpe: 6,
-      notes: 'บันทึกด่วน: Fartlek สลับจังหวะตามความรู้สึก'
-    };
-    state.cardio.push(entry);
-    save('cardio-logs', state.cardio);
-    toast('⚡ บันทึก Fartlek คาร์ดิโอ 45 นาทีแล้ว!');
-    if (document.querySelector('.tab-btn.active').dataset.tab === 'overview') renderOverview();
-    else if (document.querySelector('.tab-btn.active').dataset.tab === 'cardio') renderCardio();
-  }
-
-  function quickLogGym() {
-    const entry = {
-      id: uid(), date: todayStr(),
-      dayLabel: 'ส่วนบน + หลัง',
-      exercises: [
-        { name: 'Lat Pulldown (กว้าง)', sets: [{ reps: 10, weight: 30 }, { reps: 10, weight: 30 }, { reps: 10, weight: 30 }] },
-        { name: 'Cable Row (หนา)', sets: [{ reps: 10, weight: 25 }, { reps: 10, weight: 25 }, { reps: 10, weight: 25 }] },
-        { name: 'Dumbbell Shoulder Press', sets: [{ reps: 10, weight: 8 }, { reps: 10, weight: 8 }, { reps: 10, weight: 8 }] }
-      ]
-    };
-    state.gym.push(entry);
-    save('gym-logs', state.gym);
-    toast('⚡ บันทึกตารางยิม ส่วนบน+หลัง 3 ท่าหลักแล้ว!');
-    if (document.querySelector('.tab-btn.active').dataset.tab === 'overview') renderOverview();
-    else if (document.querySelector('.tab-btn.active').dataset.tab === 'gym') renderGym();
-  }
-
-  function quickLogFood() {
-    const entry = {
-      id: uid(), date: todayStr(),
-      time: new Date().toTimeString().slice(0, 5),
-      label: 'มื้อหลักสุขภาพ (เน้นโปรตีน)',
-      calories: 700, protein: 50
-    };
-    state.food.push(entry);
-    save('food-logs', state.food);
-    toast('⚡ บันทึกมื้อสุขภาพ 700 kcal / โปรตีน 50g แล้ว!');
-    if (document.querySelector('.tab-btn.active').dataset.tab === 'overview') renderOverview();
-    else if (document.querySelector('.tab-btn.active').dataset.tab === 'food') renderFood();
-  }
 
   // Toggle Eating Sequence Checkboxes
   function toggleSeq(idx) {
@@ -1028,9 +1243,44 @@
     <!-- Feed -->
     <div class="card">
       <h2>กิจกรรมล่าสุด</h2>
-      ${recent.length ? recent.map(r => renderFeedItem(r)).join('') : '<div class="empty">ยังไม่มีกิจกรรมวันนี้ ลองกดบันทึกด่วนด้านบนสุดได้เลย</div>'}
+      ${recent.length ? recent.map(r => renderFeedItem(r)).join('') : '<div class="empty">ยังไม่มีกิจกรรมล่าสุด — บันทึกจากแท็บ Cardio / Gym / Food ได้เลย</div>'}
     </div>
+
+    <!-- Tomorrow's Advice -->
+    ${renderTomorrowAdvice()}
   `;
+  }
+
+  // Helper: compute cycle info with arbitrary day offset (0 = today)
+  function cycleInfoOffset(offset) {
+    const c = state.cycle || DEFAULTS['cycle-settings'];
+    const starts = [...c.starts].sort();
+    const lastStart = starts[starts.length - 1];
+    if (!lastStart) return null;
+    const target = new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
+    let day = (daysBetween(lastStart, target) % c.cycleLength) + 1;
+    if (day < 1) day += c.cycleLength;
+    const ovulationDay = c.cycleLength - 14;
+    let phase, advice;
+    if (day <= c.periodLength) { phase = 'ประจำเดือน'; advice = 'ลดความหนักลง 20–30% ฟังร่างกายเป็นหลัก'; }
+    else if (day <= ovulationDay - 2) { phase = 'Follicular'; advice = 'พลังงานกำลังขึ้น เพิ่มน้ำหนัก/ความหนักเวทเทรนนิ่งได้'; }
+    else if (day <= ovulationDay + 1) { phase = 'Ovulation'; advice = 'ช่วงฟอร์มดีที่สุด เหมาะกับทำ PR หรือซ้อมวิ่งยาว'; }
+    else { phase = 'Luteal'; advice = 'เหนื่อยง่ายเป็นปกติ ลดแรงกระแทก/ความหนักลง 20–30%'; }
+    return { phase, advice, day };
+  }
+
+  function renderTomorrowAdvice() {
+    const info = cycleInfoOffset(1);
+    let adviceHtml;
+    if (!info) {
+      adviceHtml = `<div class="empty">ยังไม่ได้ตั้งค่ารอบเดือน <a href="#" onclick="route('cycle');return false;" style="color:var(--moss);font-weight:600;">ไปที่แท็บ "รอบเดือน"</a> แล้วใส่วันเริ่มรอบล่าสุดเพื่อดูคำแนะนำพรุ่งนี้</div>`;
+    } else {
+      adviceHtml = `<div><div style="font-weight:700;margin-bottom:4px;">${info.phase} · วันที่ ${info.day}<span class="badge ${info.phase === 'ประจำเดือน' || info.phase === 'Luteal' ? 'rose' : 'moss'}" style="margin-left:6px;">วันพรุ่งนี้</span></div><div style="font-size:11px;color:var(--text-dim);line-height:1.5;">${info.advice}</div></div>`;
+    }
+    return `<div class="card">
+      <h2>คำแนะนำสำหรับวันพรุ่งนี้</h2>
+      ${adviceHtml}
+    </div>`;
   }
 
   function renderFeedItem(r) {
@@ -1040,34 +1290,14 @@
   }
 
   // ---------- render: cardio ----------
-  const cardioPresets = [
-    { label: '🏃 Zone 2 Fartlek', type: 'เดิน/วิ่งปน (Fartlek)', dist: 4.5, dur: 45, hr: 130, rpe: 6, note: 'คาร์ดิโอคุมโซนตามความรู้สึก' },
-    { label: '⛰️ เดินชัน 20°', type: 'เดินขึ้นเนิน/ชัน', dist: 3.0, dur: 45, hr: 125, rpe: 5, note: 'เดินชันระดับ 20 เผาผลาญดีมาก' },
-    { label: '⚡ วิ่งยาวคุมชีพจร', type: 'วิ่ง', dist: 7.0, dur: 70, hr: 132, rpe: 6, note: 'ซ้อมวิ่งยาวคุมจังหวะ Zone 2' }
-  ];
-
-  function applyCardioPreset(idx) {
-    const p = cardioPresets[idx];
-    document.getElementById('c-type').value = p.type;
-    document.getElementById('c-dist').value = p.dist;
-    document.getElementById('c-dur').value = fmtDuration(p.dur);
-    document.getElementById('c-hr').value = p.hr;
-    document.getElementById('c-rpe').value = p.rpe;
-    document.getElementById('c-notes').value = p.note;
-    toast(`ใช้เทมเพลต: ${p.label}`);
-  }
 
   function renderCardio() {
     document.getElementById('content').innerHTML = `
     <div class="card">
-      <h2>เทมเพลตคาร์ดิโอสำเร็จรูป</h2>
-      <div class="preset-row">
-        ${cardioPresets.map((p, i) => `<button class="preset-btn" onclick="applyCardioPreset(${i})">${p.label}</button>`).join('')}
-      </div>
-    </div>
-
-    <div class="card">
       <h2>บันทึกคาร์ดิโอ</h2>
+      <button class="primary" style="margin-bottom:8px;" onclick="document.getElementById('photo-input').click()">📸 อ่านจากรูป (Strava/ลู่วิ่ง)</button>
+      <input type="file" id="photo-input" accept="image/*" capture="environment" style="display:none;" onchange="extractFromPhoto(this)">
+      <div id="photo-preview" class="photo-preview"></div>
       <div class="row">
         <div><label>วันที่</label><input type="date" id="c-date" value="${todayStr()}"></div>
         <div><label>ประเภท</label><select id="c-type"><option>เดิน/วิ่งปน (Fartlek)</option><option>วิ่ง</option><option>เดิน</option><option>เดินขึ้นเนิน/ชัน</option></select></div>
@@ -1099,23 +1329,9 @@
             <button class="inc-btn" onclick="stepVal('c-hr',5)">+</button>
           </div>
         </div>
-        <div>
-          <label>RPE (1-10)</label>
-          <div class="inc-group">
-            <button class="inc-btn" onclick="stepVal('c-rpe',-1)">-</button>
-            <input type="number" id="c-rpe" min="1" max="10" placeholder="6">
-            <button class="inc-btn" onclick="stepVal('c-rpe',1)">+</button>
-          </div>
-        </div>
       </div>
       <label style="margin-top:6px; display:block;">โน้ตเพิ่มเติม</label>
       <textarea id="c-notes" placeholder="เช่น รู้สึกดี, ซ้อมช่วงเช้า ท้องว่าง"></textarea>
-      <div style="display:flex;gap:6px;margin-top:4px;">
-        <button class="ghost" style="flex:1;" onclick="document.getElementById('photo-input').click()">📸 อ่านจากรูป (Strava/ลู่วิ่ง)</button>
-        <input type="file" id="photo-input" accept="image/*" capture="environment" style="display:none;" onchange="extractFromPhoto(this)">
-        <button class="ghost" style="flex:1;" onclick="document.getElementById('tcx-input').click()">📁 อ่านจากไฟล์ (.tcx)</button>
-        <input type="file" id="tcx-input" accept=".tcx,.xml" style="display:none;" onchange="extractFromTCX(this)">
-      </div>
       <div id="photo-status" style="font-size:10px;color:var(--text-dim);margin-top:4px;display:none;"></div>
       <button class="primary" onclick="addCardio()">บันทึกกิจกรรมคาร์ดิโอ</button>
     </div>
@@ -1125,7 +1341,7 @@
       ${state.cardio.length ? [...state.cardio].sort((a, b) => b.date.localeCompare(a.date)).map(c => `
         <div class="entry">
           <div><div class="entry-main">${c.type} · ${c.distanceKm} km ${zoneBadge(c)}</div>
-          <div class="entry-meta">${fmtDate(c.date)} · ${fmtDuration(c.durationMin)} · Pace ${c.pace}/km · HR ${c.avgHr || '-'} · RPE ${c.rpe || '-'}</div>
+          <div class="entry-meta">${fmtDate(c.date)} · ${fmtDuration(c.durationMin)} · Pace ${c.pace}/km · HR ${c.avgHr || '-'}</div>
           ${c.notes ? `<div class="entry-meta" style="margin-top:2px; color:var(--text);">${c.notes}</div>` : ''}</div>
           <button class="del" onclick="delEntry('cardio','${c.id}')">✕</button>
         </div>`).join('') : '<div class="empty">ยังไม่มีบันทึกคาร์ดิโอ</div>'}
@@ -1152,7 +1368,11 @@
     const file = input.files[0];
     if (!file) return;
     const st = document.getElementById('photo-status');
+    const overlay = document.getElementById('photo-overlay');
+    const preview = document.getElementById('photo-preview');
+
     st.style.display = 'block'; st.textContent = '⏳ กำลังวิเคราะห์รูป...';
+    overlay.classList.add('active');
 
     try {
       // Resize image to ≤1024px for API
@@ -1193,7 +1413,6 @@
   "distanceKm": ตัวเลข (km),
   "durationMin": ตัวเลข (นาที) — แปลง MM:SS เป็นนาทีทศนิยม เช่น 53:57 = 53.95,
   "avgHr": ตัวเลข (bpm) หรือ null,
-  "rpe": ตัวเลข 1-10 หรือ null ถ้าไม่มีในรูป,
   "notes": "ข้อมูลเพิ่มเติมจากรูป เช่น incline level, calories, pace เฉลี่ย หรือ null"
 }
 ถ้าอ่านค่าไหนไม่ได้ ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
@@ -1203,6 +1422,7 @@
 
       if (result.error) {
         st.textContent = `❌ ${result.error}`;
+        overlay.classList.remove('active');
         return;
       }
 
@@ -1215,6 +1435,7 @@
 
       if (!json) {
         st.textContent = '❌ ไม่สามารถแยกข้อมูลจากรูปได้ — ลองใหม่หรือกรอกเอง';
+        overlay.classList.remove('active');
         return;
       }
 
@@ -1228,98 +1449,21 @@
       if (json.distanceKm) document.getElementById('c-dist').value = json.distanceKm;
       if (json.durationMin) document.getElementById('c-dur').value = fmtDuration(json.durationMin);
       if (json.avgHr) document.getElementById('c-hr').value = json.avgHr;
-      if (json.rpe) document.getElementById('c-rpe').value = json.rpe;
       if (json.notes) document.getElementById('c-notes').value = json.notes;
+
+      // Show image preview
+      preview.innerHTML = `<img src="${base64}" alt="อัพโหลดรูป">`;
+      preview.classList.add('active');
 
       st.textContent = `✅ อ่านสำเร็จ: ${json.type || '—'} · ${json.distanceKm || '?'}km · ${fmtDuration(json.durationMin)} — ตรวจสอบและกดบันทึก`;
     } catch (e) {
       st.textContent = `❌ เกิดข้อผิดพลาด: ${e.message}`;
+    } finally {
+      overlay.classList.remove('active');
     }
 
     // Reset input so same file can be re-selected
     input.value = '';
-  }
-
-  function extractFromTCX(input) {
-    const file = input.files[0];
-    if (!file) return;
-    const st = document.getElementById('photo-status');
-    st.style.display = 'block'; st.textContent = '⏳ กำลังอ่านไฟล์ TCX...';
-
-    const reader = new FileReader();
-    reader.onload = function() {
-      try {
-        const xml = reader.result;
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(xml, 'text/xml');
-
-        // Check for parse error
-        if (doc.querySelector('parsererror')) {
-          st.textContent = '❌ ไฟล์ TCX ไม่ถูกต้อง — ตรวจสอบรูปแบบไฟล์';
-          input.value = ''; return;
-        }
-
-        // Try Garmin TCX namespace
-        const ns = 'http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2';
-        const lap = doc.getElementsByTagNameNS(ns, 'Lap')[0] || doc.querySelector('Lap');
-        if (!lap) {
-          st.textContent = '❌ ไม่พบข้อมูล Lap ในไฟล์ — อาจไม่ใช่ TCX จาก Garmin';
-          input.value = ''; return;
-        }
-
-        const totalTimeEl = lap.getElementsByTagNameNS(ns, 'TotalTimeSeconds')[0] || lap.querySelector('TotalTimeSeconds');
-        const distEl = lap.getElementsByTagNameNS(ns, 'DistanceMeters')[0] || lap.querySelector('DistanceMeters');
-        const hrEl = lap.getElementsByTagNameNS(ns, 'AverageHeartRateBpm')[0] || lap.querySelector('AverageHeartRateBpm');
-        const startEl = lap.getAttribute('StartTime');
-
-        const totalSec = totalTimeEl ? parseFloat(totalTimeEl.textContent) : null;
-        const distMeters = distEl ? parseFloat(distEl.textContent) : null;
-        const avgHr = hrEl ? (() => {
-          const v = hrEl.getElementsByTagNameNS(ns, 'Value')[0] || hrEl.querySelector('Value');
-          return v ? parseInt(v.textContent) : null;
-        })() : null;
-        const date = startEl ? startEl.slice(0, 10) : todayStr();
-
-        if (!totalSec || !distMeters) {
-          st.textContent = '❌ ไม่พบระยะทางหรือเวลาในไฟล์ TCX';
-          input.value = ''; return;
-        }
-
-        const distKm = Math.round(distMeters / 10) / 100; // meters → km, 2 decimals
-        const durMin = Math.round(totalSec / 0.6) / 100;   // seconds → decimal minutes, 2 decimals
-        const paceMin = totalSec / 60 / distKm;
-        const paceM = Math.floor(paceMin);
-        const paceS = Math.round((paceMin - paceM) * 60);
-
-        // Determine type — TCX from treadmill often has Sport="Other"
-        const activityEl = lap.parentNode;
-        const sport = (activityEl && activityEl.getAttribute('Sport')) || '';
-
-        // Auto-fill form
-        if (date) document.getElementById('c-date').value = date;
-        document.getElementById('c-dist').value = distKm;
-        document.getElementById('c-dur').value = fmtDuration(durMin);
-        if (avgHr) document.getElementById('c-hr').value = avgHr;
-        document.getElementById('c-notes').value = `Imported from TCX${sport ? ' · ' + sport : ''}`;
-
-        // Guess type from distance/time
-        const typeSel = document.getElementById('c-type');
-        const avgSpeed = distKm / (durMin / 60);
-        if (avgSpeed < 5) typeSel.value = 'เดิน';
-        else if (avgSpeed < 8) typeSel.value = 'เดิน/วิ่งปน (Fartlek)';
-        else typeSel.value = 'วิ่ง';
-
-        st.textContent = `✅ อ่าน TCX สำเร็จ: ${distKm}km · ${fmtDuration(durMin)} · Pace ${paceM}:${String(paceS).padStart(2,'0')}/km${avgHr ? ' · HR ' + avgHr : ''} — ตรวจสอบและกดบันทึก`;
-      } catch (e) {
-        st.textContent = `❌ เกิดข้อผิดพลาด: ${e.message}`;
-      }
-      input.value = '';
-    };
-    reader.onerror = function() {
-      st.textContent = '❌ ไม่สามารถอ่านไฟล์ได้';
-      input.value = '';
-    };
-    reader.readAsText(file);
   }
 
   function addCardio() {
@@ -1334,7 +1478,6 @@
       distanceKm: dist, durationMin: dur,
       pace: `${m}:${s.toString().padStart(2, '0')}`,
       avgHr: document.getElementById('c-hr').value,
-      rpe: document.getElementById('c-rpe').value,
       notes: document.getElementById('c-notes').value
     };
     state.cardio.push(entry);
@@ -1345,49 +1488,21 @@
 
   // ---------- render: gym ----------
   let gymDraft = { exercises: [] };
-  const gymPresets = [
-    {
-      label: '🏋️ ส่วนบน & หลัง (Focus)',
-      dayLabel: 'ส่วนบน + หลัง',
-      exercises: [
-        { name: 'Lat Pulldown (กว้าง)', sets: [{ reps: 10, weight: 30 }, { reps: 10, weight: 30 }, { reps: 10, weight: 30 }] },
-        { name: 'Cable Row (หนา)', sets: [{ reps: 10, weight: 25 }, { reps: 10, weight: 25 }, { reps: 10, weight: 25 }] },
-        { name: 'Dumbbell Shoulder Press', sets: [{ reps: 10, weight: 8 }, { reps: 10, weight: 8 }, { reps: 10, weight: 8 }] }
-      ]
-    },
-    {
-      label: '🦵 ขา & หน้าท้อง',
-      dayLabel: 'ขา',
-      exercises: [
-        { name: 'Leg Press', sets: [{ reps: 10, weight: 80 }, { reps: 10, weight: 90 }, { reps: 10, weight: 100 }] },
-        { name: 'Leg Extension', sets: [{ reps: 12, weight: 25 }, { reps: 12, weight: 25 }] },
-        { name: 'Plank', sets: [{ reps: 1, weight: 0 }, { reps: 1, weight: 0 }] }
-      ]
-    }
-  ];
-
-  function applyGymPreset(idx) {
-    const p = gymPresets[idx];
-    document.getElementById('g-label').value = p.dayLabel;
-    gymDraft.exercises = JSON.parse(JSON.stringify(p.exercises));
-    renderExerciseList();
-    toast(`โหลดชุดท่าทาง: ${p.label}`);
-  }
 
   function renderGym() {
     document.getElementById('content').innerHTML = `
     <div class="card">
-      <h2>โปรแกรมยิมแนะนำ</h2>
-      <div class="preset-row">
-        ${gymPresets.map((p, i) => `<button class="preset-btn" onclick="applyGymPreset(${i})">${p.label}</button>`).join('')}
-      </div>
-    </div>
-
-    <div class="card">
       <h2>บันทึกวันยิม</h2>
       <div class="row">
         <div><label>วันที่</label><input type="date" id="g-date" value="${todayStr()}"></div>
-        <div><label>โฟกัสหลักวันนี้</label><select id="g-label"><option>ส่วนบน + หลัง</option><option>ขา</option><option>Full body</option><option>อื่นๆ</option></select></div>
+        <div><label>โฟกัสหลักวันนี้</label><select id="g-label">
+          <option>Push (อก/ไหล่/หลังแขน)</option>
+          <option>Pull (หลัง/ไหล่หลัง/หน้าแขน)</option>
+          <option>Leg (ขา)</option>
+          <option>Full Body (ทั่วร่าง)</option>
+          <option>แกนกลาง (Core)</option>
+          <option>แขน (Arms)</option>
+        </select></div>
       </div>
       <div id="exercise-list"></div>
       <button class="add-exercise" onclick="addExerciseRow()">+ เพิ่มชื่อท่าฝึกใหม่</button>
@@ -1458,32 +1573,12 @@
   }
 
   // ---------- render: food ----------
-  const foodPresets = [
-    { label: '🍱 มื้อหลักสุขภาพ', name: 'มื้อหลัก (คาร์บต่ำ โปรตีนสูง)', cal: 700, pro: 50 },
-    { label: '🍗 อกไก่ + ไข่ต้ม', name: 'อกไก่ + ไข่ต้ม', cal: 300, pro: 40 },
-    { label: '🥤 เวย์โปรตีน 1 สกู๊ป', name: 'เวย์โปรตีนเชค', cal: 150, pro: 25 }
-  ];
-
-  function applyFoodPreset(idx) {
-    const p = foodPresets[idx];
-    document.getElementById('f-label').value = p.name;
-    document.getElementById('f-cal').value = p.cal;
-    document.getElementById('f-protein').value = p.pro;
-    toast(`โหลดข้อมูลมื้อ: ${p.label}`);
-  }
-
+  
   function renderFood() {
     const todayFood = state.food.filter(f => f.date === todayStr());
     const cals = todayFood.reduce((s, f) => s + Number(f.calories || 0), 0);
     const protein = todayFood.reduce((s, f) => s + Number(f.protein || 0), 0);
     document.getElementById('content').innerHTML = `
-    <div class="card">
-      <h2>เมนูอาหารยอดฮิต</h2>
-      <div class="preset-row">
-        ${foodPresets.map((p, i) => `<button class="preset-btn" onclick="applyFoodPreset(${i})">${p.label}</button>`).join('')}
-      </div>
-    </div>
-
     <div class="card">
       <h2>วันนี้กินไปแล้ว: ${cals} / ${state.profile.calorieTarget || '—'} kcal · โปรตีน ${protein} / ${state.profile.proteinTarget || '—'}g</h2>
       <div class="row">
@@ -1491,7 +1586,10 @@
         <div><label>วันที่</label><input type="date" id="f-date" value="${todayStr()}"></div>
       </div>
       <label>รายการอาหาร</label>
-      <input id="f-label" placeholder="เช่น สลัดอกไก่">
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+        <input id="f-label" placeholder="เช่น สลัดอกไก่" style="flex:1;">
+        <button class="ghost" id="ai-estimate-btn" style="flex-shrink:0;" onclick="aiEstimateNutrition()">✨ ให้ AI คำนวณแคลและโปรตีน</button>
+      </div>
       <div class="row">
         <div>
           <label>แคลอรี่ (kcal)</label>
@@ -1525,7 +1623,7 @@
   `;
   }
 
-  function addFood() {
+  async function addFood() {
     const label = document.getElementById('f-label').value;
     if (!label.trim()) { toast('กรุณาระบุรายการอาหารก่อนกดบันทึก'); return; }
     const entry = {
@@ -1536,6 +1634,28 @@
     save('food-logs', state.food);
     toast('บันทึกรายการอาหารเรียบร้อย');
     renderFood();
+  }
+
+  async function aiEstimateNutrition() {
+    const btn = document.getElementById('ai-estimate-btn');
+    const label = document.getElementById('f-label').value.trim();
+    if (!label) { toast('กรุณาใส่ชื่ออาหารก่อน'); return; }
+    btn.disabled = true; const old = btn.textContent; btn.textContent = '⏳ กำลังคำนวณ...';
+
+    const prompt = `ค้นหาข้อมูลโภชนาการจริงของอาหารนี้ และตอบเป็น JSON เดียวเท่านั้นในรูปแบบ {"calories": number, "protein": number} โดยใช้ข้อมูลจากการค้นหาเพื่อให้ได้ค่าที่ถูกต้อง สำหรับอาหาร standard serving size\n\n"${label}"`;
+    const contents = [{ role: 'user', parts: [{ text: prompt }] }];
+    const res = await callGemini('gemini-2.5-flash', contents, 'ใช้ Google Search เพื่อค้นหาข้อมูลโภชนาการจริง และส่งเฉพาะ JSON ตอบกลับ ไม่มีคำอธิบายเพิ่มเติม', { temperature: 0.0, maxOutputTokens: 200, tools: [{ google_search: {} }] });
+    btn.disabled = false; btn.textContent = old;
+    if (res.error) { toast('AI เกิดปัญหา: ' + res.error); return; }
+    // Extract JSON (non-greedy to avoid multi-object spans)
+    const m = res.text.match(/\{\s*"calories"\s*:\s*\d+\s*,\s*"protein"\s*:\s*\d+\s*\}/);
+    if (!m) { toast('AI ตอบไม่เป็น JSON'); return; }
+    try {
+      const j = JSON.parse(m[0]);
+      if (typeof j.calories === 'number') document.getElementById('f-cal').value = Math.round(j.calories);
+      if (typeof j.protein === 'number') document.getElementById('f-protein').value = Math.round(j.protein);
+      toast('เติมข้อมูลจาก AI แล้ว');
+    } catch (e) { toast('ไม่สามารถแปลงผลจาก AI ได้'); }
   }
 
   // ---------- render: cycle ----------
@@ -1615,7 +1735,7 @@
 
   // ---------- render: settings (Config) ----------
   function renderSettings() {
-    const p = state.profile || defaults.profile;
+    const p = state.profile || DEFAULTS['profile'];
     document.getElementById('content').innerHTML = `
     <div class="card">
       <h2>โปรไฟล์ & การตั้งค่าส่วนบุคคล</h2>
@@ -1667,6 +1787,24 @@
     </div>
 
     <div class="card">
+      <h2>☁️ Cloud Sync (Google Drive)</h2>
+      <div class="sync-status">${syncDrive.renderStatus()}</div>
+      ${syncDrive.connected ? `
+        <div style="font-size:10px;color:var(--text-dim);margin-bottom:6px;">เชื่อมต่อเป็น ${syncDrive.userEmail||'—'}</div>
+        <div class="sync-btn-row">
+          <button class="ghost" style="flex:1;" onclick="syncDrive.push()">⬆ Sync ทันที</button>
+          <button class="ghost" style="flex:1;" onclick="syncDrive.pull()">⬇ Pull จาก Cloud</button>
+        </div>
+        <button class="ghost" style="width:100%;margin-top:4px;" onclick="syncDrive.disconnect()">ยกเลิกการเชื่อมต่อ</button>
+      ` : `
+        <div style="font-size:11px;color:var(--text-dim);line-height:1.5;margin-bottom:8px;">สำรองข้อมูลอัตโนมัติไปยัง Google Drive — ข้อมูลจะ sync ทุกครั้งที่มีการเปลี่ยนแปลง</div>
+        <input type="text" id="drive-client-id" placeholder="Google OAuth Client ID" value="${syncDrive.clientId()}" style="font-size:11px;font-family:var(--font-mono);width:100%;margin-bottom:6px;" onchange="localStorage.setItem('_drive_client_id',this.value)">
+        <div style="font-size:9px;color:var(--text-dim);margin-bottom:8px;">สร้าง Client ID ที่ <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:var(--moss);">Google Cloud Console</a> → Web application → เพิ่ม origin นี้</div>
+        <button class="primary" style="width:100%;" onclick="syncDrive.connect()">🔗 เชื่อมต่อ Google Drive</button>
+      `}
+    </div>
+
+    <div class="card">
       <h2>จัดการข้อมูลในเบราว์เซอร์</h2>
       <div style="font-size:11px;color:var(--text-dim);line-height:1.5;">
         ข้อมูลทั้งหมดเก็บไว้บนความปลอดภัยในเบราว์เซอร์ส่วนตัวของคุณเท่านั้น (Local Storage)
@@ -1702,17 +1840,13 @@
   function saveGeminiKeys() {
     const raw = document.getElementById('gemini-keys-input').value;
     const keys = raw.split('\n').map(k => k.trim()).filter(k => k.length > 0);
-    localStorage.setItem('gemini-keys', JSON.stringify(keys));
+    dataStore.set('gemini-keys', keys);
     toast(`บันทึก ${keys.length} API key${keys.length > 1 ? 's' : ''} เรียบร้อย`);
   }
 
   function exportAllData() {
-    const data = {};
-    for (const k of ['profile','cardio-logs','gym-logs','food-logs','cycle-settings','eating-seq','coach-chats','weight-log']) {
-      const v = localStorage.getItem(k);
-      if (v !== null) data[k] = JSON.parse(v);
-    }
-    const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+    const payload = dataStore.exportAll();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = `boxbox-backup-${todayStr()}.json`; a.click();
@@ -1727,13 +1861,14 @@
     reader.onload = function() {
       try {
         const data = JSON.parse(reader.result);
-        const validKeys = ['profile','cardio-logs','gym-logs','food-logs','cycle-settings','eating-seq','coach-chats','weight-log'];
-        const keys = Object.keys(data).filter(k => validKeys.includes(k));
+
+        // Support both old flat format and new {tables, ...} format
+        const tables = data.tables || data;
+        const keys = Object.keys(tables).filter(k => TABLES.includes(k));
         if (!keys.length) { toast('ไม่พบข้อมูลที่ถูกต้องในไฟล์'); return; }
         if (!confirm(`พบข้อมูล ${keys.length} รายการ (${keys.join(', ')})\n\nต้องการเขียนทับข้อมูลปัจจุบันหรือไม่?`)) return;
-        for (const k of keys) {
-          localStorage.setItem(k, JSON.stringify(data[k]));
-        }
+        const wrapped = data.tables ? data : { tables: data, _mtimes: {} };
+        dataStore.importAll(wrapped, false);
         toast('นำเข้าข้อมูลสำเร็จ — กำลังโหลดใหม่...');
         setTimeout(() => location.reload(), 500);
       } catch (e) {
@@ -1745,8 +1880,8 @@
 
   async function resetAll() {
     if (!confirm('ล้างข้อมูลทั้งหมด? การกระทำนี้ไม่สามารถย้อนคืนได้')) return;
-    for (const k of ['profile', 'cardio-logs', 'gym-logs', 'food-logs', 'cycle-settings', 'eating-seq', 'coach-chats', 'gemini-keys', 'weight-log']) {
-      try { await S.delete(k); } catch (e) { }
+    for (const k of TABLES) {
+      try { dataStore.remove(k); } catch (e) { }
     }
     await loadAll();
     toast('ระบบได้รับการล้างข้อมูลเสร็จเรียบร้อย');
@@ -1758,7 +1893,7 @@
   let coachTyping = false;
 
   async function loadChatHistory() {
-    try { const r = await S.get('coach-chats'); chatHistory = r ? JSON.parse(r.value) : []; }
+    try { chatHistory = dataStore.get('coach-chats'); }
     catch (e) { chatHistory = []; }
   }
 
@@ -1790,6 +1925,7 @@
       const key = keys[attempt];
       const body = { contents, generationConfig: { temperature: genConfig.temperature ?? 0.7, maxOutputTokens: genConfig.maxOutputTokens ?? 1024 } };
       if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
+      if (genConfig.tools) body.tools = genConfig.tools;
 
       try {
         const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
@@ -1921,6 +2057,10 @@ ${trendLines}
     document.getElementById('content').innerHTML = `
     <div class="card" style="display:flex; flex-direction:column; overflow:hidden;">
       <div class="chat-wrap">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <div style="font-weight:700;">โค้ชส่วนตัว</div>
+          <div style="display:flex;gap:8px;"><button class="ghost" onclick="confirmClearChat()">ล้างประวัติ</button></div>
+        </div>
         <div class="chat-msgs" id="chat-msgs">
           ${chatHistory.length ? '' : '<div class="chat-empty">สวัสดี! เราเป็นโค้ชส่วนตัวของคุณ 🏋️<br>ถามเรื่องซ้อม อาหาร หรือรอบเดือนได้เลย — ระบบจะอ่านข้อมูลของคุณเพื่อให้คำแนะนำที่ตรงกับคุณที่สุด</div>'}
         </div>
@@ -1940,13 +2080,45 @@ ${trendLines}
     }
   }
 
+  async function confirmClearChat() {
+    if (!confirm('ล้างประวัติการสนทนาจริงหรือไม่? การกระทำนี้ไม่สามารถคืนค่าได้')) return;
+    chatHistory = [];
+    await save('coach-chats', chatHistory);
+    renderChatMessages();
+    toast('เคลียร์ประวัติการสนทนาแล้ว');
+  }
+
+
+  // Simple markdown-to-HTML (bold **text**, lists starting with - or *)
+  function mdToHtml(s) {
+    if (!s) return '';
+    const esc = escapeHtml(s);
+    let out = esc.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    // Strip leading newline so first line isn't blank
+    out = out.replace(/^\n+/, '');
+    const lines = out.split('\n');
+    let inList = false; let res = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (/^(-|\*)\s+/.test(trimmed)) {
+        if (!inList) { res.push('<ul>'); inList = true; }
+        res.push(`<li>${trimmed.replace(/^(-|\*)\s+/, '')}</li>`);
+      } else {
+        if (inList) { res.push('</ul>'); inList = false; }
+        res.push(trimmed ? `<p>${trimmed}</p>` : '');
+      }
+    }
+    if (inList) res.push('</ul>');
+    return res.join('');
+  }
+
   function renderChatMessages() {
     const el = document.getElementById('chat-msgs');
     if (!el) return;
     if (!chatHistory.length) return;
 
     el.innerHTML = chatHistory.map(m => `
-      <div class="chat-msg ${m.role}">${escapeHtml(m.text)}</div>
+      <div class="chat-msg ${m.role}">${m.role === 'bot' ? mdToHtml(m.text) : '<div class="user-msg">' + escapeHtml(m.text) + '</div>'}</div>
     `).join('');
 
     // Scroll to bottom
@@ -1972,9 +2144,8 @@ ${trendLines}
     showTyping();
 
     const systemPrompt = buildCoachSystemPrompt();
-    // Build contents with conversation history (last 10 exchanges)
     const contents = [];
-    const recent = chatHistory.slice(-20); // last 10 user+bot pairs
+    const recent = chatHistory.slice(-20);
     for (const m of recent) {
       if (m.role === 'user') {
         contents.push({ role: 'user', parts: [{ text: m.text }] });
@@ -2012,6 +2183,31 @@ ${trendLines}
     }
   }
 
+  // ---------- shared ----------
+  function delEntry(kind, id) {
+    const map = { cardio: 'cardio-logs', gym: 'gym-logs', food: 'food-logs' };
+    state[kind] = state[kind].filter(e => e.id !== id);
+    save(map[kind], state[kind]);
+    route(kind);
+  }
+
+  const routers = { overview: renderOverview, cardio: renderCardio, gym: renderGym, food: renderFood, cycle: renderCycle, settings: renderSettings, coach: renderCoach };
+  function route(tab) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+
+
+    routers[tab]();
+  }
+
+  document.getElementById('tabs').addEventListener('click', (e) => {
+    const btn = e.target.closest('.tab-btn');
+    if (btn) route(btn.dataset.tab);
+  });
+
+  document.getElementById('todayLabel').textContent = new Date().toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' });
+
+  loadAll().then(() => route('overview'));
+
   function showTyping() {
     coachTyping = true;
     const el = document.getElementById('chat-msgs');
@@ -2029,39 +2225,12 @@ ${trendLines}
     const el = document.getElementById('typing-indicator');
     if (el) el.remove();
   }
-
-  // ---------- shared ----------
-  function delEntry(kind, id) {
-    const map = { cardio: 'cardio-logs', gym: 'gym-logs', food: 'food-logs' };
-    state[kind] = state[kind].filter(e => e.id !== id);
-    save(map[kind], state[kind]);
-    route(kind);
-  }
-
-  const routers = { overview: renderOverview, cardio: renderCardio, gym: renderGym, food: renderFood, cycle: renderCycle, settings: renderSettings, coach: renderCoach };
-  function route(tab) {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-
-    // Only show the 1-click Quick Actions log bar on the 'Home (overview)' screen
-    const quickActionsBar = document.getElementById('quick-actions-bar');
-    if (tab === 'overview') {
-      quickActionsBar.style.display = 'block';
-    } else {
-      quickActionsBar.style.display = 'none';
-    }
-
-    routers[tab]();
-  }
-
-  document.getElementById('tabs').addEventListener('click', (e) => {
-    const btn = e.target.closest('.tab-btn');
-    if (btn) route(btn.dataset.tab);
-  });
-
-  document.getElementById('todayLabel').textContent = new Date().toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' });
-
-  loadAll().then(() => route('overview'));
 </script>
+
+<div id="photo-overlay" class="photo-overlay">
+  <div class="spinner"></div>
+  <div style="color:var(--surface); font-size:14px; font-weight:500;">กำลังวิเคราะห์รูป...</div>
+</div>
 
 </body>
 
