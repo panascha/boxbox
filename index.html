@@ -2127,7 +2127,7 @@ async function extractFoodPhoto(input) {
     if (!keys.length) return { error: 'ยังไม่ได้ตั้งค่า API Key — ไปที่แท็บ Config แล้วใส่ Gemini API Key' };
 
     // Built-in order-of-preference fallback for models
-    const fallbackList = ['gemini-2.5-flash-lite', 'gemini-2.5-flash'];
+    const fallbackList = ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash'];
     let currentModel = model;
 
     // Helper: make API call
@@ -2149,22 +2149,28 @@ async function extractFoodPhoto(input) {
     let lastError = '';
     for (let attempt = 0; attempt < keys.length; attempt++) {
       const key = keys[attempt];
+      currentModel = model; // each key starts from the requested model
 
       try {
         let res = await doFetch(currentModel, key);
 
-        // Handle model 404 or unsupported model/tool errors by falling back to next available model
-        if (res.status === 404 || res.status === 400) {
-          const errMsg = await res.text();
-          if (errMsg.includes('not found') || errMsg.includes('no longer available') || errMsg.includes('tool-incapable') || errMsg.includes('invalid model')) {
-            // Find next model that is not the failing one
-            const nextIdx = fallbackList.findIndex(m => m !== currentModel);
-            if (nextIdx !== -1) {
-              const prevModel = currentModel;
-              currentModel = fallbackList[nextIdx];
-              console.warn(`Model ${prevModel} failed or unavailable. Falling back to ${currentModel}`);
+        // Model unavailable/unsupported (incl. "not available for new user") → iterate fallback models
+        if (res.status === 404 || res.status === 403 || res.status === 400) {
+          let body = await res.text();
+          const modelErr = /not found|no longer available|not available|not supported|does not have access|permission|tool-incapable|invalid model/i.test(body);
+          if (modelErr) {
+            for (const fb of fallbackList) {
+              if (fb === currentModel) continue;
+              console.warn(`Model ${currentModel} unavailable. Trying ${fb}`);
+              currentModel = fb;
               res = await doFetch(currentModel, key);
+              if (res.ok) { body = ''; break; }
+              body = await res.text();
             }
+          }
+          if (!res.ok) {
+            lastError = `API error ${res.status}: ${body.slice(0, 120)}`;
+            continue;
           }
         }
 
