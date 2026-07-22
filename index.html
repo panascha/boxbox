@@ -1483,8 +1483,8 @@
 ถ้าอ่านค่าไหนไม่ได้ ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
 
       const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-      // Use gemini-3.5-flash-lite for image extraction
-      const result = await callGemini('gemini-3.5-flash-lite', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
+      // Use gemini-2.5-flash-lite for image extraction
+      const result = await callGemini('gemini-2.5-flash-lite', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
 
       if (result.error) {
         st.textContent = `❌ ${result.error}`;
@@ -1496,7 +1496,7 @@
       let json = parseGeminiJSON(result.text);
       if (!json) {
         // Retry: ask model to reformat as valid JSON only
-        const retry = await callGemini('gemini-3.5-flash-lite', [{ role: 'user', parts: [{ text: 'ตอบเป็น JSON object เท่านั้น ไม่ต้องอธิบาย:\n' + result.text.replace(/\{[\s\S]*\}/, '').slice(0, 500) }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
+        const retry = await callGemini('gemini-2.5-flash-lite', [{ role: 'user', parts: [{ text: 'ตอบเป็น JSON object เท่านั้น ไม่ต้องอธิบาย:\n' + result.text.replace(/\{[\s\S]*\}/, '').slice(0, 500) }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
         if (!retry.error) json = parseGeminiJSON(retry.text);
       }
 
@@ -1575,8 +1575,8 @@ async function extractFoodPhoto(input) {
 ถ้าอ่านไม่ได้เลย ให้ตอบ []`;
 
       const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-      // Primary call: use gemini-3.5-flash-lite
-      let result = await callGemini('gemini-3.5-flash-lite', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
+      // Primary call: use gemini-2.5-flash-lite
+      let result = await callGemini('gemini-2.5-flash-lite', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
 
       if (result.error) {
         setStatus(`❌ ${result.error}`);
@@ -1592,7 +1592,7 @@ async function extractFoodPhoto(input) {
       // Retry once if parse failed: ask model to reformat to JSON only
       if (!items) {
         const retryMsg = 'ส่ง JSON array [] กลับมาอย่างเท่านั้น ห้ามมีคำอธิบายหรือข้อความอื่น\nข้อความเดิม:\n' + sanitizeSnippet(result.text, 800);
-        const retry = await callGemini('gemini-3.5-flash-lite', [{ role: 'user', parts: [{ text: retryMsg }] }], null, { temperature: 0.0, maxOutputTokens: 2048 });
+        const retry = await callGemini('gemini-2.5-flash-lite', [{ role: 'user', parts: [{ text: retryMsg }] }], null, { temperature: 0.0, maxOutputTokens: 2048 });
         if (!retry.error) {
           let r2 = parseGeminiJSON(retry.text);
           if (Array.isArray(r2)) items = r2;
@@ -1823,7 +1823,7 @@ async function extractFoodPhoto(input) {
 
     const prompt = `ค้นหาข้อมูลโภชนาการจริงของอาหารนี้ และตอบเป็น JSON เดียวเท่านั้นในรูปแบบ {"calories": number, "protein": number} โดยใช้ข้อมูลจากการค้นหาเพื่อให้ได้ค่าที่ถูกต้อง สำหรับอาหาร standard serving size\n\n"${label}"`;
     const contents = [{ role: 'user', parts: [{ text: prompt }] }];
-    const res = await callGemini('gemini-3.5-flash-lite', contents, 'ใช้ Google Search เพื่อค้นหาข้อมูลโภชนาการจริง และส่งเฉพาะ JSON ตอบกลับ ไม่มีคำอธิบายเพิ่มเติม', { temperature: 0.0, maxOutputTokens: 200, tools: [{ google_search: {} }] });
+    const res = await callGemini('gemini-2.5-flash', contents, 'ใช้ Google Search เพื่อค้นหาข้อมูลโภชนาการจริง และส่งเฉพาะ JSON ตอบกลับ ไม่มีคำอธิบายเพิ่มเติม', { temperature: 0.0, maxOutputTokens: 200, tools: [{ google_search: {} }] });
     btn.disabled = false; btn.textContent = old;
     if (res.error) { toast('AI เกิดปัญหา: ' + res.error); return; }
 
@@ -1832,7 +1832,7 @@ async function extractFoodPhoto(input) {
     if (!j || typeof j.calories !== 'number' || typeof j.protein !== 'number') {
       // Retry: ask model to reformat into strict JSON only
       const retryPrompt = 'ตอบเป็น JSON object เท่านั้น เช่น {"calories": 123, "protein": 12} — ห้ามมีคำอธิบาย:\n' + res.text.slice(0, 800);
-      const retry = await callGemini('gemini-3.5-flash-lite', [{ role: 'user', parts: [{ text: retryPrompt }] }], null, { temperature: 0.0, maxOutputTokens: 200 });
+      const retry = await callGemini('gemini-2.5-flash-lite', [{ role: 'user', parts: [{ text: retryPrompt }] }], null, { temperature: 0.0, maxOutputTokens: 200 });
       if (!retry.error) j = parseGeminiJSON(retry.text);
     }
 
@@ -2127,7 +2127,7 @@ async function extractFoodPhoto(input) {
     if (!keys.length) return { error: 'ยังไม่ได้ตั้งค่า API Key — ไปที่แท็บ Config แล้วใส่ Gemini API Key' };
 
     // Built-in order-of-preference fallback for models
-    const fallbackList = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.5-flash'];
+    const fallbackList = ['gemini-2.5-flash-lite', 'gemini-2.5-flash'];
     let currentModel = model;
 
     // Helper: make API call
@@ -2135,8 +2135,8 @@ async function extractFoodPhoto(input) {
       const body = { contents, generationConfig: { temperature: genConfig.temperature ?? 0.7, maxOutputTokens: genConfig.maxOutputTokens ?? 1024 } };
       if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
 
-      // If we are calling a model and it claims tool incompatibility, we strip tools
-      if (genConfig.tools && targetModel !== 'gemini-3.6-flash' && targetModel !== 'gemini-2.1-flash') {
+      // Attach tools (google_search etc.) if supplied by caller
+      if (genConfig.tools) {
         body.tools = genConfig.tools;
       }
 
@@ -2394,7 +2394,7 @@ ${trendLines}
       }
     }
 
-    const result = await callGemini('gemini-3.5-flash-lite', contents, systemPrompt);
+    const result = await callGemini('gemini-2.5-flash-lite', contents, systemPrompt);
     hideTyping();
 
     if (result.error) {
@@ -2413,7 +2413,7 @@ ${trendLines}
     const systemPrompt = buildCoachSystemPrompt();
     const contents = [{ role: 'user', parts: [{ text: 'ช่วยวิเคราะห์ข้อมูลของฉันวันนี้และแนะนำสิ่งที่ควรทำวันนี้หน่อย — พูดสั้นๆ 1-2 ประโยค เป็นภาษาไทย' }] }];
 
-    const result = await callGemini('gemini-3.5-flash-lite', contents, systemPrompt);
+    const result = await callGemini('gemini-2.5-flash-lite', contents, systemPrompt);
     coachTyping = false;
 
     if (result.text) {
