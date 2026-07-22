@@ -1483,8 +1483,8 @@
 ถ้าอ่านค่าไหนไม่ได้ ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
 
       const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-      // Use gemini-2.5-flash-lite for image extraction
-      const result = await callGemini('gemini-2.5-flash-lite', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
+      // Router เลือก model ตาม priority + โควตาที่เหลือ
+      const result = await callGemini('auto', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
 
       if (result.error) {
         st.textContent = `❌ ${result.error}`;
@@ -1496,7 +1496,7 @@
       let json = parseGeminiJSON(result.text);
       if (!json) {
         // Retry: ask model to reformat as valid JSON only
-        const retry = await callGemini('gemini-2.5-flash-lite', [{ role: 'user', parts: [{ text: 'ตอบเป็น JSON object เท่านั้น ไม่ต้องอธิบาย:\n' + result.text.replace(/\{[\s\S]*\}/, '').slice(0, 500) }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
+        const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: 'ตอบเป็น JSON object เท่านั้น ไม่ต้องอธิบาย:\n' + result.text.replace(/\{[\s\S]*\}/, '').slice(0, 500) }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
         if (!retry.error) json = parseGeminiJSON(retry.text);
       }
 
@@ -1575,8 +1575,8 @@ async function extractFoodPhoto(input) {
 ถ้าอ่านไม่ได้เลย ให้ตอบ []`;
 
       const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-      // Primary call: use gemini-2.5-flash-lite
-      let result = await callGemini('gemini-2.5-flash-lite', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
+      // Primary call — router เลือก model
+      let result = await callGemini('auto', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
 
       if (result.error) {
         setStatus(`❌ ${result.error}`);
@@ -1592,7 +1592,7 @@ async function extractFoodPhoto(input) {
       // Retry once if parse failed: ask model to reformat to JSON only
       if (!items) {
         const retryMsg = 'ส่ง JSON array [] กลับมาอย่างเท่านั้น ห้ามมีคำอธิบายหรือข้อความอื่น\nข้อความเดิม:\n' + sanitizeSnippet(result.text, 800);
-        const retry = await callGemini('gemini-2.5-flash-lite', [{ role: 'user', parts: [{ text: retryMsg }] }], null, { temperature: 0.0, maxOutputTokens: 2048 });
+        const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: retryMsg }] }], null, { temperature: 0.0, maxOutputTokens: 2048 });
         if (!retry.error) {
           let r2 = parseGeminiJSON(retry.text);
           if (Array.isArray(r2)) items = r2;
@@ -1823,7 +1823,7 @@ async function extractFoodPhoto(input) {
 
     const prompt = `ค้นหาข้อมูลโภชนาการจริงของอาหารนี้ และตอบเป็น JSON เดียวเท่านั้นในรูปแบบ {"calories": number, "protein": number} โดยใช้ข้อมูลจากการค้นหาเพื่อให้ได้ค่าที่ถูกต้อง สำหรับอาหาร standard serving size\n\n"${label}"`;
     const contents = [{ role: 'user', parts: [{ text: prompt }] }];
-    const res = await callGemini('gemini-2.5-flash', contents, 'ใช้ Google Search เพื่อค้นหาข้อมูลโภชนาการจริง และส่งเฉพาะ JSON ตอบกลับ ไม่มีคำอธิบายเพิ่มเติม', { temperature: 0.0, maxOutputTokens: 200, tools: [{ google_search: {} }] });
+    const res = await callGemini('auto', contents, 'ใช้ Google Search เพื่อค้นหาข้อมูลโภชนาการจริง และส่งเฉพาะ JSON ตอบกลับ ไม่มีคำอธิบายเพิ่มเติม', { temperature: 0.0, maxOutputTokens: 200, tools: [{ google_search: {} }] });
     btn.disabled = false; btn.textContent = old;
     if (res.error) { toast('AI เกิดปัญหา: ' + res.error); return; }
 
@@ -1832,7 +1832,7 @@ async function extractFoodPhoto(input) {
     if (!j || typeof j.calories !== 'number' || typeof j.protein !== 'number') {
       // Retry: ask model to reformat into strict JSON only
       const retryPrompt = 'ตอบเป็น JSON object เท่านั้น เช่น {"calories": 123, "protein": 12} — ห้ามมีคำอธิบาย:\n' + res.text.slice(0, 800);
-      const retry = await callGemini('gemini-2.5-flash-lite', [{ role: 'user', parts: [{ text: retryPrompt }] }], null, { temperature: 0.0, maxOutputTokens: 200 });
+      const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: retryPrompt }] }], null, { temperature: 0.0, maxOutputTokens: 200 });
       if (!retry.error) j = parseGeminiJSON(retry.text);
     }
 
@@ -2107,6 +2107,73 @@ async function extractFoodPhoto(input) {
     save('coach-chats', chatHistory);
   }
 
+  // ---------- Model auto-router ----------
+  // Registry ตรงกับ priority list ที่กำหนด — Active เท่านั้น. prio ต่ำ = เลือกก่อน.
+  // tier 'gen' = แชท/ดึงข้อมูลทั่วไป; tier 'search' = ค้นหาโภชนาการ (ต้องการ google_search).
+  // Model ที่ไม่มีจริง/ไม่รองรับ tool จะถูก markCap ผิดปกติอัตโนมัติตอน runtime แล้วข้ามไป.
+  const MODEL_REGISTRY = {
+    gen: [
+      { model: 'gemini-3.1-flash-lite', rpd: 500, prio: 0 },
+      { model: 'gemini-3.5-flash-lite', rpd: 500, prio: 1 },
+      { model: 'gemini-3.5-flash',      rpd: 20,  prio: 2 },
+      { model: 'gemini-2.5-flash',      rpd: 20,  prio: 3 }
+    ],
+    search: [
+      { model: 'gemini-3.1-flash-lite', rpd: 500, prio: 0 },
+      { model: 'gemini-3.5-flash-lite', rpd: 500, prio: 1 },
+      { model: 'gemini-3.5-flash',      rpd: 20,  prio: 2 },
+      { model: 'gemini-2.5-flash',      rpd: 20,  prio: 3 }
+    ]
+  };
+
+  // caps เก็บ {day, models:{...}} และ reset รายวัน เหมือน quota — กัน model ถูกปิดถาวรจาก error ชั่วคราว.
+  function _loadCaps() {
+    let c = {};
+    try { c = JSON.parse(localStorage.getItem('model-caps') || '{}'); } catch (e) { c = {}; }
+    if (c.day !== todayStr()) c = { day: todayStr(), models: {} };
+    return c;
+  }
+  function isModelEnabled(model) {
+    const m = _loadCaps().models[model];
+    return !(m && m.enabled === false);
+  }
+  function markModelCap(model, patch) {
+    const c = _loadCaps(); c.models[model] = Object.assign({}, c.models[model], patch);
+    try { localStorage.setItem('model-caps', JSON.stringify(c)); } catch (e) { }
+  }
+
+  // โควตา: per-device เก็บ localStorage ('model-quota'), ไม่ sync Drive, reset รายวัน.
+  function loadModelQuota() {
+    let q = {};
+    try { q = JSON.parse(localStorage.getItem('model-quota') || '{}'); } catch (e) { q = {}; }
+    if (q.day !== todayStr()) q = { day: todayStr(), models: {} };
+    return q;
+  }
+  function saveModelQuota(q) {
+    try { localStorage.setItem('model-quota', JSON.stringify(q)); } catch (e) { }
+  }
+
+  // เลือก candidate models ของ tier: ยัง Active + โควตาเหลือ เรียงตาม priority.
+  function routerCandidates(tier) {
+    const q = loadModelQuota();
+    return (MODEL_REGISTRY[tier] || [])
+      .filter(r => isModelEnabled(r.model) && (((q.models[r.model] || {}).count || 0) < r.rpd))
+      .sort((a, b) => a.prio - b.prio);
+  }
+  function noteModelUsage(model, n) {
+    const q = loadModelQuota();
+    const e = q.models[model] || { count: 0 };
+    e.count += (n || 1); q.models[model] = e;
+    saveModelQuota(q);
+  }
+  function noteModelExhausted(model) {
+    const q = loadModelQuota();
+    const e = q.models[model] || { count: 0 };
+    const reg = (MODEL_REGISTRY.gen.concat(MODEL_REGISTRY.search)).find(r => r.model === model);
+    e.count = reg ? reg.rpd : (e.count + 1);
+    q.models[model] = e; saveModelQuota(q);
+  }
+
   // Gemini key rotation
   function geminiKeys() {
     try { return JSON.parse(localStorage.getItem('gemini-keys') || '[]'); }
@@ -2126,75 +2193,96 @@ async function extractFoodPhoto(input) {
     const keys = geminiKeys();
     if (!keys.length) return { error: 'ยังไม่ได้ตั้งค่า API Key — ไปที่แท็บ Config แล้วใส่ Gemini API Key' };
 
-    // Built-in order-of-preference fallback for models
-    const fallbackList = ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash'];
-    let currentModel = model;
+    // tier: caller ที่แนบ google_search → 'search', ที่เหลือ → 'gen'. รับ override ผ่าน genConfig.tier.
+    const needsSearch = !!(genConfig.tools && genConfig.tools.some(t => t.google_search || t.googleSearch));
+    const tier = genConfig.tier || (needsSearch ? 'search' : 'gen');
 
-    // Helper: make API call
+    // เลือก candidate ตาม router (priority + โควตาเหลือ). ถ้า router ว่าง (ทุกตัวหมดโควตา/ถูกปิด)
+    // ยังลอง requested model เดิมเป็น last resort เพื่อไม่ให้ล้มเงียบ.
+    let candidates = routerCandidates(tier).map(r => r.model);
+    if (!candidates.length) {
+      // ทุกตัวหมดโควตา/ถูกปิด → ลอง requested model (ถ้ามีและไม่ใช่ 'auto') เป็น last resort แม้โควตาบอกว่าหมด
+      // (เผื่อ counter ค้าง) — ถ้าไม่มีจริงก็จะถูก markCap ปิดแล้ว error ออกอยู่ดี.
+      if (model && model !== 'auto') candidates = [model];
+      else return { error: 'โควตาโมเดลหมดทุกตัวสำหรับวันนี้ ลองใหม่พรุ่งนี้ หรือเพิ่ม API Key ในแท็บ Config' };
+    }
+
     const doFetch = async (targetModel, key) => {
       const body = { contents, generationConfig: { temperature: genConfig.temperature ?? 0.7, maxOutputTokens: genConfig.maxOutputTokens ?? 1024 } };
       if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
-
-      // Attach tools (google_search etc.) if supplied by caller
-      if (genConfig.tools) {
-        body.tools = genConfig.tools;
-      }
-
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${key}`, {
+      if (genConfig.tools) body.tools = genConfig.tools;
+      return fetch(`https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${key}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
       });
-      return res;
     };
 
     let lastError = '';
-    for (let attempt = 0; attempt < keys.length; attempt++) {
-      const key = keys[attempt];
-      currentModel = model; // each key starts from the requested model
+    // วนตาม model (สำคัญกว่า) แล้วค่อยวน key ในแต่ละ model.
+    for (const targetModel of candidates) {
+      let all429 = true;      // ทุก key ของ model นี้โดน 429 หรือไม่
+      let perDay429 = false;  // 429 นั้นเป็นโควตา "รายวัน" (RPD) หรือแค่ "รายนาที" (RPM)
+      for (let ki = 0; ki < keys.length; ki++) {
+        const key = keys[ki];
+        try {
+          const res = await doFetch(targetModel, key);
 
-      try {
-        let res = await doFetch(currentModel, key);
-
-        // Model unavailable/unsupported (incl. "not available for new user") → iterate fallback models
-        if (res.status === 404 || res.status === 403 || res.status === 400) {
-          let body = await res.text();
-          const modelErr = /not found|no longer available|not available|not supported|does not have access|permission|tool-incapable|invalid model/i.test(body);
-          if (modelErr) {
-            for (const fb of fallbackList) {
-              if (fb === currentModel) continue;
-              console.warn(`Model ${currentModel} unavailable. Trying ${fb}`);
-              currentModel = fb;
-              res = await doFetch(currentModel, key);
-              if (res.ok) { body = ''; break; }
-              body = await res.text();
+          // Model ตายจริง → ปิด (reset รายวัน) แล้วข้ามไป candidate ถัดไป.
+          // ปิดเฉพาะ 404 (Gemini คืน 404 กับ model ที่ไม่มี/เลิกใช้) + ข้อความบ่งชี้ตัว model โดยตรง
+          // เพื่อไม่ให้ error สภาพแวดล้อม (location ไม่รองรับ, safety, รูปพัง = 400/403) มาปิด model ผิด.
+          if (res.status === 404 || res.status === 403 || res.status === 400) {
+            const body = await res.text();
+            const modelDead = res.status === 404 &&
+              /no longer available|is not found|not found|does not have access|tool-incapable|unsupported model|invalid model/i.test(body);
+            if (modelDead) {
+              console.warn(`Model ${targetModel} ปิดวันนี้: ${body.slice(0, 80)}`);
+              markModelCap(targetModel, { enabled: false, reason: body.slice(0, 120), at: Date.now() });
+              all429 = false;
+              break; // ไป model ถัดไป
             }
-          }
-          if (!res.ok) {
             lastError = `API error ${res.status}: ${body.slice(0, 120)}`;
+            all429 = false;
+            continue; // error ชั่วคราว/คำขอผิด → ลอง key ถัดไป ไม่ปิด model
+          }
+
+          // Quota เต็มของ key นี้ → หมุน key แล้วลอง key ถัดไปกับ model เดิม.
+          if (res.status === 429) {
+            // แยก RPD (รายวัน → bench ทั้งวัน) ออกจาก RPM (รายนาที → แค่ชั่วคราว ไม่ bench).
+            // Gemini ใส่ quota metric ใน body เช่น ...RequestsPerDay... / ...PerMinute...
+            let qbody = ''; try { qbody = await res.text(); } catch (e) { }
+            const isRpm = /per\s*minute|PerMinute|RequestsPerMinute/i.test(qbody);
+            const isRpd = /per\s*day|PerDay|RequestsPerDay/i.test(qbody);
+            if (isRpd && !isRpm) perDay429 = true; // ชัดเจนว่ารายวันเท่านั้น
+            rotateKey();
+            lastError = `${targetModel}: ถึงขีดจำกัด ${perDay429 ? 'รายวัน' : 'รายนาที'} — สลับอัตโนมัติ`;
             continue;
           }
-        }
 
-        if (res.status === 429) {
-          rotateKey();
-          lastError = 'ถึงขีดจำกัด API — เปลี่ยน key อัตโนมัติ';
-          continue;
-        }
+          if (!res.ok) {
+            const err = await res.text();
+            lastError = `API error ${res.status}: ${err.slice(0, 120)}`;
+            all429 = false;
+            continue;
+          }
 
-        if (!res.ok) {
-          const err = await res.text();
-          lastError = `API error ${res.status}: ${err.slice(0, 120)}`;
-          continue;
+          const data = await res.json();
+          const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) {
+            noteModelUsage(targetModel, 1);
+            return { text: text.trim(), modelUsed: targetModel };
+          }
+          // ตอบว่าง(เช่น finish=length/ไม่มี tool_calls) → ถือว่า model นี้ใช้ไม่ได้กับงานนี้ ไป model ถัดไป.
+          lastError = 'API ตอบกลับโดยไม่มีข้อความ';
+          all429 = false;
+        } catch (e) {
+          lastError = `เชื่อมต่อล้มเหลว: ${e.message}`;
+          all429 = false;
         }
-
-        const data = await res.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) return { text: text.trim(), modelUsed: currentModel };
-        lastError = 'API ตอบกลับโดยไม่มีข้อความ';
-      } catch (e) {
-        lastError = `เชื่อมต่อล้มเหลว: ${e.message}`;
       }
+      // ทุก key โดน 429 "แบบรายวัน" → mark model เต็มทั้งวัน. ถ้าเป็นแค่รายนาที ไม่ bench
+      // (ปล่อยให้ยังเป็น candidate รอบหน้า) — แค่ขยับไป priority ถัดไปในรอบนี้.
+      if (all429 && perDay429) noteModelExhausted(targetModel);
     }
-    return { error: lastError || 'ไม่มี API key ใช้ได้' };
+    return { error: lastError || 'ไม่มีโมเดลที่ใช้ได้ (โควตาหมดทุกตัว)' };
   }
 
   function buildCoachSystemPrompt() {
@@ -2400,7 +2488,7 @@ ${trendLines}
       }
     }
 
-    const result = await callGemini('gemini-2.5-flash-lite', contents, systemPrompt);
+    const result = await callGemini('auto', contents, systemPrompt);
     hideTyping();
 
     if (result.error) {
@@ -2419,7 +2507,7 @@ ${trendLines}
     const systemPrompt = buildCoachSystemPrompt();
     const contents = [{ role: 'user', parts: [{ text: 'ช่วยวิเคราะห์ข้อมูลของฉันวันนี้และแนะนำสิ่งที่ควรทำวันนี้หน่อย — พูดสั้นๆ 1-2 ประโยค เป็นภาษาไทย' }] }];
 
-    const result = await callGemini('gemini-2.5-flash-lite', contents, systemPrompt);
+    const result = await callGemini('auto', contents, systemPrompt);
     coachTyping = false;
 
     if (result.text) {
