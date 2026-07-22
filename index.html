@@ -771,7 +771,7 @@
   // Single choke point for all persistence. Every read/write/delete flows through here.
   const TABLES = ['profile','cardio-logs','gym-logs','food-logs','cycle-settings','eating-seq','weight-log','coach-chats','gemini-keys'];
   const DEFAULTS = {
-    'profile':       { name:'', age:null, height:null, weightGoal:null, currentWeight:null, deadline:'', tdee:null, calorieTarget:null, proteinTarget:null },
+    'profile':       { name:'', age:null, height:null, gender:null, weightGoal:null, currentWeight:null, deadline:'', tdee:null, calorieTarget:null, proteinTarget:null },
     'cardio-logs':   [],
     'gym-logs':      [],
     'food-logs':     [],
@@ -1926,6 +1926,20 @@ async function extractFoodPhoto(input) {
     <div class="card">
       <h2>โปรไฟล์ & การตั้งค่าส่วนบุคคล</h2>
       <div class="row">
+        <div><label>ชื่อ</label><input type="text" id="p-name" value="${p.name ?? ''}"></div>
+        <div><label>เพศ</label>
+          <select id="p-gender" onchange="toggleCycleTabVisibility()">
+            <option value="">เลือกเพศ</option>
+            <option value="male" ${p.gender === 'male' ? 'selected' : ''}>ชาย</option>
+            <option value="female" ${p.gender === 'female' ? 'selected' : ''}>หญิง</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div><label>อายุ (ปี)</label><input type="number" id="p-age" value="${p.age ?? ''}"></div>
+        <div><label>ส่วนสูง (cm)</label><input type="number" id="p-height" value="${p.height ?? ''}"></div>
+      </div>
+      <div class="row">
         <div>
           <label>น้ำหนักปัจจุบัน (kg)</label>
           <div class="inc-group">
@@ -2002,6 +2016,10 @@ async function extractFoodPhoto(input) {
 
   function saveProfile() {
     const oldWeight = state.profile.currentWeight;
+    state.profile.name = document.getElementById('p-name').value.trim();
+    state.profile.age = parseInt(document.getElementById('p-age').value) || null;
+    state.profile.height = parseFloat(document.getElementById('p-height').value) || null;
+    state.profile.gender = document.getElementById('p-gender').value || null;
     state.profile.currentWeight = parseFloat(document.getElementById('p-curr').value) || state.profile.currentWeight;
     state.profile.weightGoal = parseFloat(document.getElementById('p-goal').value) || state.profile.weightGoal;
     state.profile.deadline = document.getElementById('p-deadline').value;
@@ -2009,6 +2027,8 @@ async function extractFoodPhoto(input) {
     state.profile.calorieTarget = parseInt(document.getElementById('p-cal').value) || state.profile.calorieTarget;
     state.profile.proteinTarget = parseInt(document.getElementById('p-protein').value) || state.profile.proteinTarget;
     save('profile', state.profile);
+
+    toggleCycleTabVisibility();
 
     // Auto-append weight log if weight changed
     if (state.profile.currentWeight && state.profile.currentWeight !== oldWeight) {
@@ -2233,6 +2253,10 @@ async function extractFoodPhoto(input) {
     return `คุณคือโค้ชซ้อมส่วนตัวของผู้ใช้คนนี้ ช่วยตอบคำถามและให้คำแนะนำการซ้อม อาหาร และรอบเดือน
 
   ข้อมูลผู้ใช้:
+  - ชื่อ: ${p.name || '—'}
+  - เพศ: ${p.gender === 'female' ? 'หญิง' : p.gender === 'male' ? 'ชาย' : '—'}
+  - อายุ: ${p.age || '—'} ปี
+  - ส่วนสูง: ${p.height || '—'} cm
   - น้ำหนักปัจจุบัน: ${p.currentWeight || '—'} kg
   - น้ำหนักเป้าหมาย: ${p.weightGoal || '—'} kg (เดดไลน์: ${p.deadline || '—'})
   - TDEE: ${p.tdee || '—'} kcal
@@ -2240,9 +2264,9 @@ async function extractFoodPhoto(input) {
   - โปรตีนเป้าหมาย/วัน: ${p.proteinTarget || '—'}g
 
   รอบเดือนวันนี้:
-  - วันที่ ${info.dayInCycle} / ${info.cycleLength} — ช่วง: ${info.phase}
+  ${p.gender === 'female' ? `- วันที่ ${info.dayInCycle} / ${info.cycleLength} — ช่วง: ${info.phase}
   - ${info.advice}
-  - ${info.intensityDesc}
+  - ${info.intensityDesc}` : 'ผู้ใช้เป็นเพศชายหรือไม่ระบุ ไม่จำเป็นต้องติดตามรอบเดือน'}
 
   วันนี้:
   - คาร์ดิโอ: ${todayCardio.length} ครั้ง — ${todayCardio.map(c => c.type + ' ' + c.distanceKm + 'km ' + fmtDuration(c.durationMin)).join(', ') || 'ยังไม่มี'}
@@ -2422,7 +2446,25 @@ ${trendLines}
 
   document.getElementById('todayLabel').textContent = new Date().toLocaleDateString('th-TH', { weekday: 'short', day: 'numeric', month: 'short' });
 
-  loadAll().then(() => route('overview'));
+  function toggleCycleTabVisibility() {
+    const cycleTab = document.querySelector('.tab-btn[data-tab="cycle"]');
+    if (!cycleTab) return;
+
+    const gender = state.profile && state.profile.gender;
+    if (gender === 'female') {
+      cycleTab.style.display = '';
+    } else {
+      cycleTab.style.display = 'none';
+      if (document.querySelector('.tab-btn[data-tab="cycle"].active')) {
+        route('overview');
+      }
+    }
+  }
+
+  loadAll().then(() => {
+    toggleCycleTabVisibility();
+    route('overview');
+  });
 
   function showTyping() {
     coachTyping = true;
