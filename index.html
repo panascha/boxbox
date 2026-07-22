@@ -1364,6 +1364,71 @@
     return m + (s || 0) / 60;
   }
 
+  // Helpers for AI response parsing
+  function sanitizeSnippet(text, maxLen = 800) {
+    if (!text) return '';
+    // remove long runs of whitespace, limit length
+    let s = String(text).replace(/```[\s\S]*?```/g, ' ').replace(/\s+/g, ' ').trim();
+    if (s.length > maxLen) s = s.slice(0, maxLen) + '...';
+    return s;
+  }
+
+  // Robust JSON extraction from Gemini responses (handles markdown fences, targeted single-quote fixes, trailing commas)
+  function parseGeminiJSON(text) {
+    if (!text) return null;
+    // Strip markdown fences
+    let t = String(text).replace(/```(?:json)?\s*([\s\S]*?)```/g, '$1').trim();
+    // Find first {...} or [...] substring (greedy minimal match)
+    const m = t.match(/[\[{][\s\S]*[\]}]/);
+    if (!m) return null;
+    let s = m[0];
+
+    // Strategy: try clean parse, then apply safe transforms
+    try { return JSON.parse(s); } catch (e) {}
+
+    // 1) Remove trailing commas: `,}` or `,]`
+    let cand = s.replace(/,\s*([\]}])/g, '$1');
+
+    // 2) Replace single-quoted keys/strings but avoid changing contractions/apostrophes inside words
+    // Replace patterns like : 'value' or 'key': with double quotes
+    cand = cand.replace(/(\{|\[|,|:)\s*'([^']*)'(?=\s*[:,\]}]|$)/g, (_, p1, p2) => `${p1} "${p2}"`);
+    cand = cand.replace(/'([^']*)'(?=\s*[:,\]}])/g, (_m, g1) => `"${g1}"`);
+
+    // 3) Ensure object keys are quoted: unquotedKey: value -> "unquotedKey": value
+    cand = cand.replace(/([,{\s])([A-Za-z0-9_\- ]+?)\s*:/g, (_m, p1, p2) => {
+      // If already quoted, keep
+      if (/^\s*".*"$/.test(p2)) return `${p1}${p2}:`;
+      return `${p1}"${p2.trim()}":`;
+    });
+
+    // 4) Normalize repeated whitespace
+    cand = cand.replace(/\s+/g, ' ');
+
+    try { return JSON.parse(cand); } catch (e) {
+      // store debug info for dev inspection
+      try { localStorage.setItem('_last_ai_parse_fail', JSON.stringify({ original: sanitizeSnippet(s, 1000), candidate: sanitizeSnippet(cand, 1000), err: e && e.message, time: Date.now() })); } catch (e2) {}
+    }
+
+    return null;
+  }
+
+  // Dev test helper: run parseGeminiJSON on sample cases when on localhost or ?dev=true
+  function parseGeminiJSON_tests() {
+    try {
+      const samples = [
+        '```json\n{"calories": 123, "protein": 12}\n```',
+        "{ 'calories': 200, 'protein': 15 }",
+        '{ "calories": 300, "protein": 20, }',
+        'Here is result:\n[ {"label":"ข้าวมันไก่","qty":1,"calories":600,"protein":30} ] and extra text',
+      ];
+      console.group('parseGeminiJSON tests');
+      samples.forEach((s, i) => console.log(i, parseGeminiJSON(s)));
+      console.groupEnd();
+    } catch (e) {}
+  }
+  if (location && (location.hostname === 'localhost' || location.search.includes('dev=true'))) try { parseGeminiJSON_tests(); } catch (e) {}
+
+
   async function extractFromPhoto(input) {
     const file = input.files[0];
     if (!file) return;
@@ -1418,7 +1483,8 @@
 ถ้าอ่านค่าไหนไม่ได้ ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
 
       const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-      const result = await callGemini('gemini-3.1-flash-lite', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
+      // Use gemini-3.5-flash-lite for image extraction
+      const result = await callGemini('gemini-3.5-flash-lite', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
 
       if (result.error) {
         st.textContent = `❌ ${result.error}`;
@@ -1426,11 +1492,12 @@
         return;
       }
 
-      // Parse JSON from response
-      let json = null;
-      const jsonMatch = result.text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        try { json = JSON.parse(jsonMatch[0]); } catch (e) {}
+      // Robust JSON extraction: try direct parse then regex fallback with cleanup
+      let json = parseGeminiJSON(result.text);
+      if (!json) {
+        // Retry: ask model to reformat as valid JSON only
+        const retry = await callGemini('gemini-3.5-flash-lite', [{ role: 'user', parts: [{ text: 'ตอบเป็น JSON object เท่านั้น ไม่ต้องอธิบาย:\n' + result.text.replace(/\{[\s\S]*\}/, '').slice(0, 500) }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
+        if (!retry.error) json = parseGeminiJSON(retry.text);
       }
 
       if (!json) {
@@ -1464,6 +1531,113 @@
 
     // Reset input so same file can be re-selected
     input.value = '';
+  }
+
+async function extractFoodPhoto(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const st = document.getElementById('food-photo-status');
+    const setStatus = (t) => { if (st) { st.textContent = t; st.style.color = t.startsWith('✅') ? 'var(--moss)' : t.startsWith('❌') ? 'var(--rose)' : 'var(--text-dim)'; } };
+    setStatus('⏳ กำลังวิเคราะห์รูปเมนู/ออเดอร์...');
+
+    try {
+      // Resize to ≤1024px
+      const img = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => { const i = new Image(); i.onload = () => resolve(i); i.onerror = reject; i.src = r.result; };
+        r.onerror = reject; r.readAsDataURL(file);
+      });
+      const maxDim = 1024;
+      let w = img.width, h = img.height;
+      if (w > maxDim || h > maxDim) { const r = Math.min(maxDim / w, maxDim / h); w = Math.round(w * r); h = Math.round(h * r); }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      const base64 = canvas.toDataURL('image/jpeg', 0.8);
+
+      const prompt = `มองภาพนี้ — อาจเป็นรูปเมนูร้านอาหาร, ภาพหน้าจอแอพส่งอาหาร (Grab/Lineman/ShopeeFood/foodpanda/UberEats) หรือใบเสร็จสั่งอาหาร
+
+อ่านรายการอาหารที่สั่ง/อยู่ในภาพ:
+- ระบุชื่อเมนูเป็นภาษาไทย
+- ระบุจำนวน (เช่น 2 กล่อง, 1 จาน)
+- ประเมินแคลอรี่และโปรตีนต่อ 1 ส่วน (standard serving) ตามข้อมูลที่ค้นได้หรือค่าเฉลี่ยที่เชื่อถือได้
+- ถ้าเห็นราคา/ขนาดที่ระบุไว้ ให้ใช้เพื่อปรับค่าให้ใกล้เคียง
+
+ตอบเป็น JSON array [] เท่านั้น ห้ามอธิบายหรือคำอื่น ๆ:
+[
+  {
+    "label": "ชื่อเมนู เช่น ข้าวมันไก่",
+    "qty": 1,
+    "calories": 550,
+    "protein": 30
+  }
+]
+ถ้าอ่านไม่ได้เลย ให้ตอบ []`;
+
+      const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
+      // Primary call: use gemini-3.5-flash-lite
+      let result = await callGemini('gemini-3.5-flash-lite', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
+
+      if (result.error) {
+        setStatus(`❌ ${result.error}`);
+        return;
+      }
+
+      // Save meta for dev inspection
+      try { localStorage.setItem('_last_ai_meta', JSON.stringify({ endpoint: 'extractFoodPhoto', model: result.modelUsed || null, text: sanitizeSnippet(result.text, 1200), time: Date.now() })); } catch (e) {}
+
+      let items = parseGeminiJSON(result.text);
+      if (!Array.isArray(items)) items = null;
+
+      // Retry once if parse failed: ask model to reformat to JSON only
+      if (!items) {
+        const retryMsg = 'ส่ง JSON array [] กลับมาอย่างเท่านั้น ห้ามมีคำอธิบายหรือข้อความอื่น\nข้อความเดิม:\n' + sanitizeSnippet(result.text, 800);
+        const retry = await callGemini('gemini-3.5-flash-lite', [{ role: 'user', parts: [{ text: retryMsg }] }], null, { temperature: 0.0, maxOutputTokens: 2048 });
+        if (!retry.error) {
+          let r2 = parseGeminiJSON(retry.text);
+          if (Array.isArray(r2)) items = r2;
+          // Fallback: find raw [...] substring inside retry text using parser helper
+          if (!items && retry.text) {
+            const am = retry.text.match(/\[[\s\S]*\]/);
+            if (am) {
+              try {
+                let tmp = String(am[0]).replace(/```[\s\S]*?```/g, '');
+                // replace single-quoted string values without disturbing contractions
+                tmp = tmp.replace(/(\{|,|:)\s*'([^']*)'(?=\s*[:,\])]|$)/g, (_, p1, p2) => `${p1} "${p2}"`);
+                tmp = tmp.replace(/,\s*([\]}])/g, '$1');
+                items = JSON.parse(tmp);
+                if (!Array.isArray(items)) items = null;
+              } catch (e) { try { localStorage.setItem('_last_ai_parse_retry_raw', String(retry.text).slice(0, 1200)); } catch (e2) {} }
+            }
+          }
+          try { localStorage.setItem('_last_ai_meta_retry', JSON.stringify({ model: retry.modelUsed || null, text: sanitizeSnippet(retry.text, 1200), time: Date.now() })); } catch (e) {}
+        }
+      }
+
+      if (!items || !Array.isArray(items) || !items.length) {
+        setStatus('❌ ไม่สามารถระบุรายการอาหารจากรูปได้ — กรุณาระบุเอง');
+        input.value = '';
+        return;
+      }
+
+      // Sum calories/protein × qty, build label
+      const totalCal = items.reduce((s, x) => s + (Number(x.calories) || 0) * (Number(x.qty) || 1), 0);
+      const totalProt = items.reduce((s, x) => s + (Number(x.protein) || 0) * (Number(x.qty) || 1), 0);
+      const labelList = items.map(x => `${x.qty > 1 ? x.qty + 'x ' : ''}${x.label}`).join(', ');
+
+      const labelEl = document.getElementById('f-label');
+      const calEl = document.getElementById('f-cal');
+      const protEl = document.getElementById('f-protein');
+      if (labelEl) labelEl.value = labelList;
+      if (calEl) calEl.value = Math.round(totalCal);
+      if (protEl) protEl.value = Math.round(totalProt);
+
+      setStatus(`✅ พบ ${items.length} รายการ — เติม ${Math.round(totalCal)} kcal / ${Math.round(totalProt)}g โปรตีนแล้ว (ตรวจสอบก่อนกดบันทึก)`);
+    } catch (e) {
+      setStatus(`❌ การประมวลผลรูปภาพล้มเหลว: ${e.message || e}`);
+    } finally {
+      try { input.value = ''; } catch (e) {}
+    }
   }
 
   function addCardio() {
@@ -1588,7 +1762,11 @@
       <label>รายการอาหาร</label>
       <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
         <input id="f-label" placeholder="เช่น สลัดอกไก่" style="flex:1;">
-        <button class="ghost" id="ai-estimate-btn" style="flex-shrink:0;" onclick="aiEstimateNutrition()">✨ ให้ AI คำนวณแคลและโปรตีน</button>
+        <div style="display:flex;gap:6px;align-items:center;">
+            <input type="file" id="food-photo-input" accept="image/*" style="display:none;" onchange="extractFoodPhoto(this)">
+            <button class="ghost" onclick="document.getElementById('food-photo-input').click()">📸 อัพโหลดรูปเมนู/ออเดอร์</button>
+            <button class="ghost" id="ai-estimate-btn" style="flex-shrink:0;" onclick="aiEstimateNutrition()">✨ ให้ AI คำนวณแคลและโปรตีน</button>
+          </div>
       </div>
       <div class="row">
         <div>
@@ -1609,6 +1787,7 @@
         </div>
       </div>
       <button class="primary" onclick="addFood()">บันทึกมื้ออาหาร</button>
+      <div id="food-photo-status" style="font-size:11px;color:var(--text-dim);margin-top:6px;min-height:1.2em;"></div>
     </div>
 
     <div class="card">
@@ -1644,14 +1823,21 @@
 
     const prompt = `ค้นหาข้อมูลโภชนาการจริงของอาหารนี้ และตอบเป็น JSON เดียวเท่านั้นในรูปแบบ {"calories": number, "protein": number} โดยใช้ข้อมูลจากการค้นหาเพื่อให้ได้ค่าที่ถูกต้อง สำหรับอาหาร standard serving size\n\n"${label}"`;
     const contents = [{ role: 'user', parts: [{ text: prompt }] }];
-    const res = await callGemini('gemini-2.5-flash', contents, 'ใช้ Google Search เพื่อค้นหาข้อมูลโภชนาการจริง และส่งเฉพาะ JSON ตอบกลับ ไม่มีคำอธิบายเพิ่มเติม', { temperature: 0.0, maxOutputTokens: 200, tools: [{ google_search: {} }] });
+    const res = await callGemini('gemini-3.5-flash-lite', contents, 'ใช้ Google Search เพื่อค้นหาข้อมูลโภชนาการจริง และส่งเฉพาะ JSON ตอบกลับ ไม่มีคำอธิบายเพิ่มเติม', { temperature: 0.0, maxOutputTokens: 200, tools: [{ google_search: {} }] });
     btn.disabled = false; btn.textContent = old;
     if (res.error) { toast('AI เกิดปัญหา: ' + res.error); return; }
-    // Extract JSON (non-greedy to avoid multi-object spans)
-    const m = res.text.match(/\{\s*"calories"\s*:\s*\d+\s*,\s*"protein"\s*:\s*\d+\s*\}/);
-    if (!m) { toast('AI ตอบไม่เป็น JSON'); return; }
+
+    // Try parse robustly
+    let j = parseGeminiJSON(res.text);
+    if (!j || typeof j.calories !== 'number' || typeof j.protein !== 'number') {
+      // Retry: ask model to reformat into strict JSON only
+      const retryPrompt = 'ตอบเป็น JSON object เท่านั้น เช่น {"calories": 123, "protein": 12} — ห้ามมีคำอธิบาย:\n' + res.text.slice(0, 800);
+      const retry = await callGemini('gemini-3.5-flash-lite', [{ role: 'user', parts: [{ text: retryPrompt }] }], null, { temperature: 0.0, maxOutputTokens: 200 });
+      if (!retry.error) j = parseGeminiJSON(retry.text);
+    }
+
+    if (!j || typeof j.calories !== 'number' || typeof j.protein !== 'number') { toast('AI ตอบไม่เป็น JSON'); return; }
     try {
-      const j = JSON.parse(m[0]);
       if (typeof j.calories === 'number') document.getElementById('f-cal').value = Math.round(j.calories);
       if (typeof j.protein === 'number') document.getElementById('f-protein').value = Math.round(j.protein);
       toast('เติมข้อมูลจาก AI แล้ว');
@@ -1920,17 +2106,47 @@
     const keys = geminiKeys();
     if (!keys.length) return { error: 'ยังไม่ได้ตั้งค่า API Key — ไปที่แท็บ Config แล้วใส่ Gemini API Key' };
 
+    // Built-in order-of-preference fallback for models
+    const fallbackList = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.5-flash'];
+    let currentModel = model;
+
+    // Helper: make API call
+    const doFetch = async (targetModel, key) => {
+      const body = { contents, generationConfig: { temperature: genConfig.temperature ?? 0.7, maxOutputTokens: genConfig.maxOutputTokens ?? 1024 } };
+      if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
+
+      // If we are calling a model and it claims tool incompatibility, we strip tools
+      if (genConfig.tools && targetModel !== 'gemini-3.6-flash' && targetModel !== 'gemini-2.1-flash') {
+        body.tools = genConfig.tools;
+      }
+
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${key}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+      return res;
+    };
+
     let lastError = '';
     for (let attempt = 0; attempt < keys.length; attempt++) {
       const key = keys[attempt];
-      const body = { contents, generationConfig: { temperature: genConfig.temperature ?? 0.7, maxOutputTokens: genConfig.maxOutputTokens ?? 1024 } };
-      if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction }] };
-      if (genConfig.tools) body.tools = genConfig.tools;
 
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-        });
+        let res = await doFetch(currentModel, key);
+
+        // Handle model 404 or unsupported model/tool errors by falling back to next available model
+        if (res.status === 404 || res.status === 400) {
+          const errMsg = await res.text();
+          if (errMsg.includes('not found') || errMsg.includes('no longer available') || errMsg.includes('tool-incapable') || errMsg.includes('invalid model')) {
+            // Find next model that is not the failing one
+            const nextIdx = fallbackList.findIndex(m => m !== currentModel);
+            if (nextIdx !== -1) {
+              const prevModel = currentModel;
+              currentModel = fallbackList[nextIdx];
+              console.warn(`Model ${prevModel} failed or unavailable. Falling back to ${currentModel}`);
+              res = await doFetch(currentModel, key);
+            }
+          }
+        }
 
         if (res.status === 429) {
           rotateKey();
@@ -1946,7 +2162,7 @@
 
         const data = await res.json();
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) return { text: text.trim() };
+        if (text) return { text: text.trim(), modelUsed: currentModel };
         lastError = 'API ตอบกลับโดยไม่มีข้อความ';
       } catch (e) {
         lastError = `เชื่อมต่อล้มเหลว: ${e.message}`;
@@ -2154,7 +2370,7 @@ ${trendLines}
       }
     }
 
-    const result = await callGemini('gemini-3.1-flash-lite', contents, systemPrompt);
+    const result = await callGemini('gemini-3.5-flash-lite', contents, systemPrompt);
     hideTyping();
 
     if (result.error) {
@@ -2173,7 +2389,7 @@ ${trendLines}
     const systemPrompt = buildCoachSystemPrompt();
     const contents = [{ role: 'user', parts: [{ text: 'ช่วยวิเคราะห์ข้อมูลของฉันวันนี้และแนะนำสิ่งที่ควรทำวันนี้หน่อย — พูดสั้นๆ 1-2 ประโยค เป็นภาษาไทย' }] }];
 
-    const result = await callGemini('gemini-3.1-flash-lite', contents, systemPrompt);
+    const result = await callGemini('gemini-3.5-flash-lite', contents, systemPrompt);
     coachTyping = false;
 
     if (result.text) {
