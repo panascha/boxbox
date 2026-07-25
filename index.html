@@ -1296,7 +1296,7 @@
     <div class="card">
       <h2>บันทึกคาร์ดิโอ</h2>
       <button class="primary" style="margin-bottom:8px;" onclick="document.getElementById('photo-input').click()">📸 อ่านจากรูป (Strava/ลู่วิ่ง)</button>
-      <input type="file" id="photo-input" accept="image/*" capture="environment" style="display:none;" onchange="extractFromPhoto(this)">
+      <input type="file" id="photo-input" accept="image/*" style="display:none;" onchange="extractFromPhoto(this)">
       <div id="photo-preview" class="photo-preview"></div>
       <div class="row">
         <div><label>วันที่</label><input type="date" id="c-date" value="${todayStr()}"></div>
