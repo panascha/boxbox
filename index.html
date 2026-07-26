@@ -1015,7 +1015,8 @@
 
   window.addEventListener('online', () => { if (syncDrive.connected) { syncDrive.status='online'; syncDrive.push(); } });
   window.addEventListener('offline', () => { if (syncDrive.connected) syncDrive.status = 'offline'; });
-  let state = { profile: null, cardio: [], gym: [], food: [], cycle: null, eatingSeq: [false, false, false, false], weightLog: [] };
+  // pendingChatDraft: ร่างข้อมูลที่อ่านได้จากรูปในแชท รอผู้ใช้ยืนยัน — { type:'cardio'|'food'|'gym'|'weight', data:{...} }
+  let state = { profile: null, cardio: [], gym: [], food: [], cycle: null, eatingSeq: [false, false, false, false], weightLog: [], pendingChatDraft: null };
 
   function save(key, val) {
     try { dataStore.set(key, val); } catch (e) { toast('บันทึกไม่สำเร็จ ลองใหม่'); }
@@ -2678,6 +2679,8 @@ ${trendLines}
         </div>
         <div class="chat-input-row">
           <input type="text" id="coach-input" placeholder="ถามโค้ช..." onkeydown="if(event.key==='Enter')sendCoachMsg()">
+          <input type="file" id="chat-photo-input" accept="image/*" style="display:none;" onchange="handleChatPhotoUpload(this)">
+          <button class="ghost" style="padding:8px 10px;font-size:16px;line-height:1" onclick="document.getElementById('chat-photo-input').click()" title="ส่งรูป">📷</button>
           <button id="coach-send-btn" onclick="sendCoachMsg()">ส่ง</button>
         </div>
       </div>
@@ -2776,6 +2779,95 @@ ${trendLines}
     }
     saveChatHistory();
     renderChatMessages();
+  }
+
+  // ---------- chat photo draft workflow ----------
+  async function handleChatPhotoUpload(input) {
+    try {
+      const files = Array.from(input.files || []);
+      if (!files.length) return;
+
+      const currentTab = document.querySelector('.tab-btn.active').dataset.tab;
+      let extractFn;
+      if (currentTab === 'cardio') extractFn = extractWorkoutPhoto;
+      else if (currentTab === 'food') extractFn = extractFoodPhoto;
+      else { console.log('chat photo upload skipped: not on cardio/food tab'); return; }
+
+      const overlay = document.getElementById('photo-overlay');
+      overlay.classList.add('active');
+
+      const data = await extractFn(input);
+      state.pendingChatDraft = { type: currentTab, data };
+      renderChatDraftReviewCard();
+
+      overlay.style.display = 'none';
+      try { input.value = ''; } catch (e) {}
+    } catch (e) {
+      console.error('chat photo upload failed:', e);
+      toast(`❌ ${e.message || 'วิเคราะห์รูปไม่สำเร็จ'}`);
+      const overlay = document.getElementById('photo-overlay');
+      if (overlay) overlay.style.display = 'none';
+    }
+  }
+
+  function renderChatDraftReviewCard() {
+    const el = document.getElementById('chat-msgs');
+    if (!el) return;
+
+    const existing = document.getElementById('chat-draft-review');
+    if (existing) existing.remove();
+
+    const div = document.createElement('div');
+    div.id = 'chat-draft-review';
+    div.className = 'chat-draft-review';
+
+    const draft = state.pendingChatDraft;
+    if (!draft) return;
+    const dataJson = JSON.stringify(draft.data);
+    div.innerHTML =
+      '<div class="draft-header">รีวิวข้อมูลจากรูป</div>' +
+      '<div class="draft-content">' + dataJson + '</div>' +
+      '<div class="draft-actions">' +
+        '<button onclick="confirmChatDraft()">ยืนยัน</button>' +
+        '<button onclick="cancelChatDraft()">ยกเลิก</button>' +
+      '</div>';
+    el.appendChild(div);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  async function confirmChatDraft() {
+    try {
+      const draft = state.pendingChatDraft;
+      if (!draft) return;
+
+      const map = {
+        cardio: 'cardio-logs',
+        food: 'food-logs',
+        gym: 'gym-logs',
+        weight: 'weight-log'
+      };
+      const key = map[draft.type];
+      if (key) {
+        state[draft.type].push(draft.data);
+        await save(key, state[draft.type]);
+        route(draft.type);
+      }
+
+      state.pendingChatDraft = null;
+      const reviewCard = document.getElementById('chat-draft-review');
+      if (reviewCard) reviewCard.remove();
+      toast('✅ บันทึกข้อมูลสำเร็จ');
+    } catch (e) {
+      console.error('confirm draft failed:', e);
+      toast('❌ บันทึกข้อมูลไม่สำเร็จ');
+    }
+  }
+
+  function cancelChatDraft() {
+    state.pendingChatDraft = null;
+    const reviewCard = document.getElementById('chat-draft-review');
+    if (reviewCard) reviewCard.remove();
+    toast('ยกเลิกการบันทึก');
   }
 
   async function sendProactiveSuggestion() {
