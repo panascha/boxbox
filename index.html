@@ -1542,8 +1542,7 @@
 
         let json = parseGeminiJSON(result.text);
         if (!json) {
-          const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: 'ตอบเป็น JSON object เท่านั้น ไม่ต้องอธิบาย:
-' + result.text.replace(/\{[\s\S]*\}/, '').slice(0, 500) }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
+          const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: 'ตอบเป็น JSON object เท่านั้น ไม่ต้องอธิบาย:\n' + result.text.replace(/\{[\s\S]*\}/, '').slice(0, 500) }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
           if (!retry.error) json = parseGeminiJSON(retry.text);
         }
 
