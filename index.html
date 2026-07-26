@@ -1340,7 +1340,7 @@
     <div class="card">
       <h2>บันทึกคาร์ดิโอ</h2>
       <button class="primary" style="margin-bottom:8px;" onclick="document.getElementById('photo-input').click()">📸 อ่านจากรูป (Strava/ลู่วิ่ง)</button>
-      <input type="file" id="photo-input" accept="image/*" style="display:none;" onchange="extractFromPhoto(this)">
+      <input type="file" id="photo-input" accept="image/*" multiple style="display:none;" onchange="extractFromPhoto(this)">
       <div id="photo-preview" class="photo-preview"></div>
       <div class="row">
         <div><label>วันที่</label><input type="date" id="c-date" value="${todayStr()}"></div>
@@ -1474,41 +1474,47 @@
 
 
   async function extractFromPhoto(input) {
-    const file = input.files[0];
-    if (!file) return;
+    const files = Array.from(input.files || []);
+    if (!files.length) return;
     const st = document.getElementById('photo-status');
     const overlay = document.getElementById('photo-overlay');
     const preview = document.getElementById('photo-preview');
 
-    st.style.display = 'block'; st.textContent = '⏳ กำลังวิเคราะห์รูป...';
+    st.style.display = 'block';
     overlay.classList.add('active');
 
-    try {
-      // Resize image to ≤1024px for API
-      const img = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const i = new Image();
-          i.onload = () => resolve(i);
-          i.onerror = reject;
-          i.src = reader.result;
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+    const added = [];
 
-      const maxDim = 1024;
-      let w = img.width, h = img.height;
-      if (w > maxDim || h > maxDim) {
-        const ratio = Math.min(maxDim / w, maxDim / h);
-        w = Math.round(w * ratio); h = Math.round(h * ratio);
-      }
-      const canvas = document.createElement('canvas');
-      canvas.width = w; canvas.height = h;
-      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-      const base64 = canvas.toDataURL('image/jpeg', 0.8);
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        st.textContent = `⏳ กำลังวิเคราะห์รูป ${i + 1} จาก ${files.length}...`;
 
-      const prompt = `วิเคราะห์รูปภาพนี้ — มันคือภาพหน้าจอ Strava/แอพวิ่ง หรือหน้าจอลู่วิ่ง (Fairtex/Technogym/etc.)
+        // Resize image to ≤1024px for API
+        const img = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const iimg = new Image();
+            iimg.onload = () => resolve(iimg);
+            iimg.onerror = reject;
+            iimg.src = reader.result;
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+
+        const maxDim = 1024;
+        let w = img.width, h = img.height;
+        if (w > maxDim || h > maxDim) {
+          const ratio = Math.min(maxDim / w, maxDim / h);
+          w = Math.round(w * ratio); h = Math.round(h * ratio);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        const base64 = canvas.toDataURL('image/jpeg', 0.8);
+
+        const prompt = `วิเคราะห์รูปภาพนี้ — มันคือภาพหน้าจอ Strava/แอพวิ่ง หรือหน้าจอลู่วิ่ง (Fairtex/Technogym/etc.)
 
 ข้อมูลที่ควรอ่าน:
 - Strava: look for "Moving Time" (durationMin), "Distance" (km), "Avg HR", "Avg Pace", "Elev Gain"
@@ -1526,162 +1532,156 @@
 }
 ถ้าอ่านค่าไหนไม่ได้ ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
 
-      const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-      // Router เลือก model ตาม priority + โควตาที่เหลือ
-      const result = await callGemini('auto', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
+        const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
+        const result = await callGemini('auto', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
 
-      if (result.error) {
-        st.textContent = `❌ ${result.error}`;
-        overlay.classList.remove('active');
-        return;
+        if (result.error) {
+          console.warn('extractFromPhoto error for file', file.name, result.error);
+          continue;
+        }
+
+        let json = parseGeminiJSON(result.text);
+        if (!json) {
+          const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: 'ตอบเป็น JSON object เท่านั้น ไม่ต้องอธิบาย:
+' + result.text.replace(/\{[\s\S]*\}/, '').slice(0, 500) }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
+          if (!retry.error) json = parseGeminiJSON(retry.text);
+        }
+
+        if (!json) {
+          console.warn('Could not parse JSON from image', file.name);
+          continue;
+        }
+
+        const entry = {
+          id: uid(),
+          date: todayStr(),
+          type: json.type || 'วิ่ง',
+          distanceKm: Number(json.distanceKm) || 0,
+          durationMin: Number(json.durationMin) || 0,
+          pace: json.distanceKm && json.durationMin ? `${Math.floor((json.durationMin / json.distanceKm))}:${Math.round(((json.durationMin / json.distanceKm) % 1) * 60).toString().padStart(2,'0')}` : '',
+          avgHr: json.avgHr || null,
+          notes: json.notes || ''
+        };
+
+        state.cardio.push(entry);
+        added.push(entry);
+
+        preview.innerHTML = `<img src="${base64}" alt="อัพโหลดรูป">`;
+        preview.classList.add('active');
+
+      } catch (e) {
+        console.warn('extractFromPhoto processing error', e);
+        continue;
       }
-
-      // Robust JSON extraction: try direct parse then regex fallback with cleanup
-      let json = parseGeminiJSON(result.text);
-      if (!json) {
-        // Retry: ask model to reformat as valid JSON only
-        const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: 'ตอบเป็น JSON object เท่านั้น ไม่ต้องอธิบาย:\n' + result.text.replace(/\{[\s\S]*\}/, '').slice(0, 500) }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
-        if (!retry.error) json = parseGeminiJSON(retry.text);
-      }
-
-      if (!json) {
-        st.textContent = '❌ ไม่สามารถแยกข้อมูลจากรูปได้ — ลองใหม่หรือกรอกเอง';
-        overlay.classList.remove('active');
-        return;
-      }
-
-      // Auto-fill form
-      if (json.type && document.getElementById('c-type')) {
-        const sel = document.getElementById('c-type');
-        const opts = [...sel.options].map(o => o.value);
-        const match = opts.find(o => o.includes(json.type) || json.type.includes(o));
-        if (match) sel.value = match;
-      }
-      if (json.distanceKm) document.getElementById('c-dist').value = json.distanceKm;
-      if (json.durationMin) document.getElementById('c-dur').value = fmtDuration(json.durationMin);
-      if (json.avgHr) document.getElementById('c-hr').value = json.avgHr;
-      if (json.notes) document.getElementById('c-notes').value = json.notes;
-
-      // Show image preview
-      preview.innerHTML = `<img src="${base64}" alt="อัพโหลดรูป">`;
-      preview.classList.add('active');
-
-      st.textContent = `✅ อ่านสำเร็จ: ${json.type || '—'} · ${json.distanceKm || '?'}km · ${fmtDuration(json.durationMin)} — ตรวจสอบและกดบันทึก`;
-    } catch (e) {
-      st.textContent = `❌ เกิดข้อผิดพลาด: ${e.message}`;
-    } finally {
-      overlay.classList.remove('active');
     }
 
-    // Reset input so same file can be re-selected
-    input.value = '';
+    if (added.length) {
+      save('cardio-logs', state.cardio);
+      toast(`เพิ่มบันทึกคาร์ดิโอ ${added.length} รายการแล้ว`);
+      renderCardio();
+    } else {
+      toast('ไม่พบข้อมูลคาร์ดิโอจากรูปใดๆ');
+    }
+
+    st.style.display = 'none';
+    overlay.classList.remove('active');
+    try { input.value = ''; } catch (e) {}
   }
 
 async function extractFoodPhoto(input) {
-    const file = input.files[0];
-    if (!file) return;
+    const files = Array.from(input.files || []);
+    if (!files.length) return;
     const st = document.getElementById('food-photo-status');
     const setStatus = (t) => { if (st) { st.textContent = t; st.style.color = t.startsWith('✅') ? 'var(--moss)' : t.startsWith('❌') ? 'var(--rose)' : 'var(--text-dim)'; } };
     setStatus('⏳ กำลังวิเคราะห์รูปเมนู/ออเดอร์...');
 
-    try {
-      // Resize to ≤1024px
-      const img = await new Promise((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => { const i = new Image(); i.onload = () => resolve(i); i.onerror = reject; i.src = r.result; };
-        r.onerror = reject; r.readAsDataURL(file);
-      });
-      const maxDim = 1024;
-      let w = img.width, h = img.height;
-      if (w > maxDim || h > maxDim) { const r = Math.min(maxDim / w, maxDim / h); w = Math.round(w * r); h = Math.round(h * r); }
-      const canvas = document.createElement('canvas');
-      canvas.width = w; canvas.height = h;
-      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-      const base64 = canvas.toDataURL('image/jpeg', 0.8);
+    const aggregated = []; // {items from all photos}
 
-      const prompt = `มองภาพนี้ — อาจเป็นรูปเมนูร้านอาหาร, ภาพหน้าจอแอพส่งอาหาร (Grab/Lineman/ShopeeFood/foodpanda/UberEats) หรือใบเสร็จสั่งอาหาร
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        setStatus(`⏳ กำลังวิเคราะห์รูปเมนู ${i + 1} จาก ${files.length}...`);
+        // Resize to ≤1024px
+        const img = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => { const ii = new Image(); ii.onload = () => resolve(ii); ii.onerror = reject; ii.src = r.result; };
+          r.onerror = reject; r.readAsDataURL(file);
+        });
+        const maxDim = 1024;
+        let w = img.width, h = img.height;
+        if (w > maxDim || h > maxDim) { const ratio = Math.min(maxDim / w, maxDim / h); w = Math.round(w * ratio); h = Math.round(h * ratio); }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        const base64 = canvas.toDataURL('image/jpeg', 0.8);
 
-อ่านรายการอาหารที่สั่ง/อยู่ในภาพ:
-- ระบุชื่อเมนูเป็นภาษาไทย
-- ระบุจำนวน (เช่น 2 กล่อง, 1 จาน)
-- ประเมินแคลอรี่และโปรตีนต่อ 1 ส่วน (standard serving) ตามข้อมูลที่ค้นได้หรือค่าเฉลี่ยที่เชื่อถือได้
-- ถ้าเห็นราคา/ขนาดที่ระบุไว้ ให้ใช้เพื่อปรับค่าให้ใกล้เคียง
+        const prompt = `มองภาพนี้ — อาจเป็นรูปเมนูร้านอาหาร, ภาพหน้าจอแอพส่งอาหาร (Grab/Lineman/ShopeeFood/foodpanda/UberEats) หรือใบเสร็จสั่งอาหาร\n\nอ่านรายการอาหารที่สั่ง/อยู่ในภาพ:\n- ระบุชื่อเมนูเป็นภาษาไทย\n- ระบุจำนวน (เช่น 2 กล่อง, 1 จาน)\n- ประเมินแคลอรี่และโปรตีนต่อ 1 ส่วน (standard serving) ตามข้อมูลที่ค้นได้หรือค่าเฉลี่ยที่เชื่อถือได้\n- ถ้าเห็นราคา/ขนาดที่ระบุไว้ ให้ใช้เพื่อปรับค่าให้ใกล้เคียง\n\nตอบเป็น JSON array [] เท่านั้น ห้ามอธิบายหรือคำอื่น ๆ:\n[\n  {\n    "label": "ชื่อเมนู เช่น ข้าวมันไก่",\n    "qty": 1,\n    "calories": 550,\n    "protein": 30\n  }\n]\nถ้าอ่านไม่ได้เลย ให้ตอบ []`;
 
-ตอบเป็น JSON array [] เท่านั้น ห้ามอธิบายหรือคำอื่น ๆ:
-[
-  {
-    "label": "ชื่อเมนู เช่น ข้าวมันไก่",
-    "qty": 1,
-    "calories": 550,
-    "protein": 30
-  }
-]
-ถ้าอ่านไม่ได้เลย ให้ตอบ []`;
+        const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
+        let result = await callGemini('auto', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
 
-      const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-      // Primary call — router เลือก model
-      let result = await callGemini('auto', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
-
-      if (result.error) {
-        setStatus(`❌ ${result.error}`);
-        return;
-      }
-
-      // Save meta for dev inspection
-      try { localStorage.setItem('_last_ai_meta', JSON.stringify({ endpoint: 'extractFoodPhoto', model: result.modelUsed || null, text: sanitizeSnippet(result.text, 1200), time: Date.now() })); } catch (e) {}
-
-      let items = parseGeminiJSON(result.text);
-      if (!Array.isArray(items)) items = null;
-
-      // Retry once if parse failed: ask model to reformat to JSON only
-      if (!items) {
-        const retryMsg = 'ส่ง JSON array [] กลับมาอย่างเท่านั้น ห้ามมีคำอธิบายหรือข้อความอื่น\nข้อความเดิม:\n' + sanitizeSnippet(result.text, 800);
-        const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: retryMsg }] }], null, { temperature: 0.0, maxOutputTokens: 2048 });
-        if (!retry.error) {
-          let r2 = parseGeminiJSON(retry.text);
-          if (Array.isArray(r2)) items = r2;
-          // Fallback: find raw [...] substring inside retry text using parser helper
-          if (!items && retry.text) {
-            const am = retry.text.match(/\[[\s\S]*\]/);
-            if (am) {
-              try {
-                let tmp = String(am[0]).replace(/```[\s\S]*?```/g, '');
-                // replace single-quoted string values without disturbing contractions
-                tmp = tmp.replace(/(\{|,|:)\s*'([^']*)'(?=\s*[:,\])]|$)/g, (_, p1, p2) => `${p1} "${p2}"`);
-                tmp = tmp.replace(/,\s*([\]}])/g, '$1');
-                items = JSON.parse(tmp);
-                if (!Array.isArray(items)) items = null;
-              } catch (e) { try { localStorage.setItem('_last_ai_parse_retry_raw', String(retry.text).slice(0, 1200)); } catch (e2) {} }
-            }
-          }
-          try { localStorage.setItem('_last_ai_meta_retry', JSON.stringify({ model: retry.modelUsed || null, text: sanitizeSnippet(retry.text, 1200), time: Date.now() })); } catch (e) {}
+        if (result.error) {
+          console.warn('extractFoodPhoto error for file', file.name, result.error);
+          continue;
         }
+
+        try { localStorage.setItem('_last_ai_meta', JSON.stringify({ endpoint: 'extractFoodPhoto', model: result.modelUsed || null, text: sanitizeSnippet(result.text, 1200), time: Date.now() })); } catch (e) {}
+
+        let items = parseGeminiJSON(result.text);
+        if (!Array.isArray(items)) items = null;
+
+        if (!items) {
+          const retryMsg = 'ส่ง JSON array [] กลับมาอย่างเท่านั้น ห้ามมีคำอธิบายหรือข้อความอื่น\nข้อความเดิม:\n' + sanitizeSnippet(result.text, 800);
+          const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: retryMsg }] }], null, { temperature: 0.0, maxOutputTokens: 2048 });
+          if (!retry.error) {
+            let r2 = parseGeminiJSON(retry.text);
+            if (Array.isArray(r2)) items = r2;
+            if (!items && retry.text) {
+              const am = retry.text.match(/\[[\s\S]*\]/);
+              if (am) {
+                try {
+                  let tmp = String(am[0]).replace(/```[\s\S]*?```/g, '');
+                  tmp = tmp.replace(/(\{|,|:)\s*'([^']*)'(?=\s*[:,\])]|$)/g, (_, p1, p2) => `${p1} "${p2}"`);
+                  tmp = tmp.replace(/,\s*([\]}])/g, '$1');
+                  items = JSON.parse(tmp);
+                  if (!Array.isArray(items)) items = null;
+                } catch (e) { try { localStorage.setItem('_last_ai_parse_retry_raw', String(retry.text).slice(0, 1200)); } catch (e2) {} }
+              }
+            }
+            try { localStorage.setItem('_last_ai_meta_retry', JSON.stringify({ model: retry.modelUsed || null, text: sanitizeSnippet(retry.text, 1200), time: Date.now() })); } catch (e) {}
+          }
+        }
+
+        if (!items || !Array.isArray(items) || !items.length) {
+          continue; // non-fatal — skip this image, keep processing others
+        }
+        aggregated.push(...items);
+      } catch (e) {
+        console.warn('extractFoodPhoto processing error', e);
+        continue;
       }
-
-      if (!items || !Array.isArray(items) || !items.length) {
-        setStatus('❌ ไม่สามารถระบุรายการอาหารจากรูปได้ — กรุณาระบุเอง');
-        input.value = '';
-        return;
-      }
-
-      // Sum calories/protein × qty, build label
-      const totalCal = items.reduce((s, x) => s + (Number(x.calories) || 0) * (Number(x.qty) || 1), 0);
-      const totalProt = items.reduce((s, x) => s + (Number(x.protein) || 0) * (Number(x.qty) || 1), 0);
-      const labelList = items.map(x => `${x.qty > 1 ? x.qty + 'x ' : ''}${x.label}`).join(', ');
-
-      const labelEl = document.getElementById('f-label');
-      const calEl = document.getElementById('f-cal');
-      const protEl = document.getElementById('f-protein');
-      if (labelEl) labelEl.value = labelList;
-      if (calEl) calEl.value = Math.round(totalCal);
-      if (protEl) protEl.value = Math.round(totalProt);
-
-      setStatus(`✅ พบ ${items.length} รายการ — เติม ${Math.round(totalCal)} kcal / ${Math.round(totalProt)}g โปรตีนแล้ว (ตรวจสอบก่อนกดบันทึก)`);
-    } catch (e) {
-      setStatus(`❌ การประมวลผลรูปภาพล้มเหลว: ${e.message || e}`);
-    } finally {
-      try { input.value = ''; } catch (e) {}
     }
+
+    if (!aggregated.length) {
+      setStatus('❌ ไม่สามารถระบุรายการอาหารจากรูปใดๆ — กรุณาลองใหม่');
+      try { input.value = ''; } catch (e) {}
+      return;
+    }
+
+    // Sum calories/protein × qty, build label
+    const totalCal = aggregated.reduce((s, x) => s + (Number(x.calories) || 0) * (Number(x.qty) || 1), 0);
+    const totalProt = aggregated.reduce((s, x) => s + (Number(x.protein) || 0) * (Number(x.qty) || 1), 0);
+    const labelList = aggregated.map(x => `${x.qty > 1 ? x.qty + 'x ' : ''}${x.label}`).join(', ');
+
+    const labelEl = document.getElementById('f-label');
+    const calEl = document.getElementById('f-cal');
+    const protEl = document.getElementById('f-protein');
+    if (labelEl) labelEl.value = labelList;
+    if (calEl) calEl.value = Math.round(totalCal);
+    if (protEl) protEl.value = Math.round(totalProt);
+
+    setStatus(`✅ พบ ${aggregated.length} เมนูรวมทุกรูป — เติม ${Math.round(totalCal)} kcal / ${Math.round(totalProt)}g โปรตีนแล้ว (ตรวจสอบก่อนกดบันทึก)`);
+    try { input.value = ''; } catch (e) {}
   }
 
   function addCardio() {
@@ -1806,7 +1806,7 @@ async function extractFoodPhoto(input) {
       <label>รายการอาหาร</label>
       <input id="f-label" placeholder="เช่น สลัดอกไก่" style="width:100%;margin-bottom:6px;">
       <div style="display:flex;gap:6px;margin-bottom:6px;">
-          <input type="file" id="food-photo-input" accept="image/*" style="display:none;" onchange="extractFoodPhoto(this)">
+          <input type="file" id="food-photo-input" accept="image/*" multiple style="display:none;" onchange="extractFoodPhoto(this)">
           <button class="ghost" style="flex:1;" onclick="document.getElementById('food-photo-input').click()">📸 อัพโหลดรูปเมนู/ออเดอร์</button>
           <button class="ghost" id="ai-estimate-btn" style="flex:1;" onclick="aiEstimateNutrition()">✨ ให้ AI คำนวณแคลและโปรตีน</button>
       </div>

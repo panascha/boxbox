@@ -2,3 +2,6 @@
 handoff.md
 MEMORY.md
 memory/
+
+# Generated repomix output — only for AI context, never commit
+repomix-output.xml
