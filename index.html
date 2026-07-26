@@ -1685,8 +1685,8 @@
     const overlay = document.getElementById('photo-overlay');
     const preview = document.getElementById('photo-preview');
 
-    st.style.display = 'block';
-    overlay.classList.add('active');
+    st && (st.style.display = 'block');
+    overlay && overlay.classList.add('active');
 
     const added = [];
 
@@ -1772,8 +1772,8 @@
         state.cardio.push(entry);
         added.push(entry);
 
-        preview.innerHTML = `<img src="${base64}" alt="อัพโหลดรูป">`;
-        preview.classList.add('active');
+        preview && (preview.innerHTML = `<img src="${base64}" alt="อัพโหลดรูป">`);
+        preview && preview.classList.add('active');
 
       } catch (e) {
         console.warn('extractFromPhoto processing error', e);
@@ -1792,21 +1792,21 @@
       const cDur = document.getElementById('c-dur');
       const cHr = document.getElementById('c-hr');
       const cNotes = document.getElementById('c-notes');
-      if (draft.date && cDate) cDate.value = draft.date;
-      if (draft.type && cType) { try { cType.value = draft.type; } catch (e) {} }
-      if (draft.distanceKm && cDist) cDist.value = draft.distanceKm;
-      if (draft.durationMin && cDur) cDur.value = fmtDuration(draft.durationMin);
-      if (draft.avgHr && cHr) cHr.value = draft.avgHr;
-      if (draft.notes && cNotes) cNotes.value = draft.notes;
-      st.textContent = `✅ อ่านค่าแล้ว (${added.length} รูป) — ตรวจสอบแล้วกด 'บันทึกกิจกรรมคาร์ดิโอ' อีกครั้งหรือแก้ก่อนบันทึก`;
-      st.style.display = 'block';
+      if (cDate && draft.date) cDate.value = draft.date;
+      if (cType && draft.type) { try { cType.value = draft.type; } catch (e) {} }
+      if (cDist && draft.distanceKm) cDist.value = draft.distanceKm;
+      if (cDur && draft.durationMin) cDur.value = fmtDuration(draft.durationMin);
+      if (cHr && draft.avgHr) cHr.value = draft.avgHr;
+      if (cNotes && draft.notes) cNotes.value = draft.notes;
+      st && (st.textContent = `✅ อ่านค่าแล้ว (${added.length} รูป) — ตรวจสอบแล้วกด 'บันทึกกิจกรรมคาร์ดิโอ' อีกครั้งหรือแก้ก่อนบันทึก`);
+      st && (st.style.display = 'block');
       toast(`อ่านค่าจากรูปแล้ว — ตรวจสอบก่อนกดบันทึกอีกครั้ง`);
     } else {
       toast('ไม่พบข้อมูลคาร์ดิโอจากรูปใดๆ');
     }
 
-    st.style.display = 'none';
-    overlay.classList.remove('active');
+    st && (st.style.display = 'none');
+    overlay && overlay.classList.remove('active');
     try { input.value = ''; } catch (e) {}
   }
 
@@ -2679,7 +2679,7 @@ ${trendLines}
         </div>
         <div class="chat-input-row">
           <input type="text" id="coach-input" placeholder="ถามโค้ช..." onkeydown="if(event.key==='Enter')sendCoachMsg()">
-          <input type="file" id="chat-photo-input" accept="image/*" style="display:none;" onchange="handleChatPhotoUpload(this)">
+          <input type="file" id="chat-photo-input" multiple accept="image/*" style="display:none;" onchange="handleChatPhotoUpload(this)">
           <button class="ghost" style="padding:8px 10px;font-size:16px;line-height:1" onclick="document.getElementById('chat-photo-input').click()" title="ส่งรูป">📷</button>
           <button id="coach-send-btn" onclick="sendCoachMsg()">ส่ง</button>
         </div>
