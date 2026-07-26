@@ -806,7 +806,7 @@
   // Single choke point for all persistence. Every read/write/delete flows through here.
   const TABLES = ['profile','cardio-logs','gym-logs','food-logs','cycle-settings','eating-seq','weight-log','coach-chats','gemini-keys'];
   const DEFAULTS = {
-    'profile':       { name:'', age:null, height:null, gender:null, weightGoal:null, currentWeight:null, deadline:'', tdee:null, calorieTarget:null, proteinTarget:null },
+    'profile':       { name:'', birthDate:null, age:null, height:null, gender:null, weightGoal:null, currentWeight:null, deadline:'', tdee:null, calorieTarget:null, proteinTarget:null },
     'cardio-logs':   [],
     'gym-logs':      [],
     'food-logs':     [],
@@ -1041,6 +1041,15 @@
     return `${m}:${String(s).padStart(2,'0')}`;
   };
   // Parse "MM:SS" or "H:MM:SS" to decimal minutes; also handles plain numbers
+  function calcAge(birthDate) {
+    if (!birthDate) return null;
+    const b = new Date(birthDate);
+    const now = new Date();
+    let age = now.getFullYear() - b.getFullYear();
+    const mDiff = now.getMonth() - b.getMonth();
+    if (mDiff < 0 || (mDiff === 0 && now.getDate() < b.getDate())) age--;
+    return age;
+  }
   function parseDuration(str) {
     if (!str || !str.trim()) return null;
     const t = str.trim();
@@ -1795,13 +1804,11 @@ async function extractFoodPhoto(input) {
         <div><label>วันที่</label><input type="date" id="f-date" value="${todayStr()}"></div>
       </div>
       <label>รายการอาหาร</label>
-      <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
-        <input id="f-label" placeholder="เช่น สลัดอกไก่" style="flex:1;">
-        <div style="display:flex;gap:6px;align-items:center;">
-            <input type="file" id="food-photo-input" accept="image/*" style="display:none;" onchange="extractFoodPhoto(this)">
-            <button class="ghost" onclick="document.getElementById('food-photo-input').click()">📸 อัพโหลดรูปเมนู/ออเดอร์</button>
-            <button class="ghost" id="ai-estimate-btn" style="flex-shrink:0;" onclick="aiEstimateNutrition()">✨ ให้ AI คำนวณแคลและโปรตีน</button>
-          </div>
+      <input id="f-label" placeholder="เช่น สลัดอกไก่" style="width:100%;margin-bottom:6px;">
+      <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <input type="file" id="food-photo-input" accept="image/*" style="display:none;" onchange="extractFoodPhoto(this)">
+          <button class="ghost" style="flex:1;" onclick="document.getElementById('food-photo-input').click()">📸 อัพโหลดรูปเมนู/ออเดอร์</button>
+          <button class="ghost" id="ai-estimate-btn" style="flex:1;" onclick="aiEstimateNutrition()">✨ ให้ AI คำนวณแคลและโปรตีน</button>
       </div>
       <div class="row">
         <div>
@@ -1881,6 +1888,16 @@ async function extractFoodPhoto(input) {
 
   // ---------- render: cycle ----------
   function renderCycle() {
+    const p = state.profile || DEFAULTS['profile'];
+    if (p.gender !== 'female') {
+      document.getElementById('content').innerHTML = `
+        <div class="card">
+          <h2>รอบเดือน</h2>
+          <div class="empty">การติดตามรอบเดือนใช้ได้เฉพาะผู้ใช้เพศหญิง — กรุณาตั้งค่าเพศในหน้า ⚙️ ตั้งค่า</div>
+        </div>
+      `;
+      return;
+    }
     const info = cycleInfo();
     document.getElementById('content').innerHTML = `
     <div class="card">
@@ -1971,8 +1988,12 @@ async function extractFoodPhoto(input) {
         </div>
       </div>
       <div class="row">
-        <div><label>อายุ (ปี)</label><input type="number" id="p-age" value="${p.age ?? ''}"></div>
+        <div><label>วันเกิด</label><input type="date" id="p-birthdate" value="${p.birthDate ?? ''}"></div>
+        <div><label>อายุ</label><div style="padding:10px 12px;background:var(--surface-raised);border-radius:8px;font-size:14px;font-weight:600;">${calcAge(p.birthDate) || '—'}</div></div>
+      </div>
+      <div class="row">
         <div><label>ส่วนสูง (cm)</label><input type="number" id="p-height" value="${p.height ?? ''}"></div>
+        <div></div>
       </div>
       <div class="row">
         <div>
@@ -2052,7 +2073,8 @@ async function extractFoodPhoto(input) {
   function saveProfile() {
     const oldWeight = state.profile.currentWeight;
     state.profile.name = document.getElementById('p-name').value.trim();
-    state.profile.age = parseInt(document.getElementById('p-age').value) || null;
+    state.profile.birthDate = document.getElementById('p-birthdate').value || null;
+    state.profile.age = calcAge(state.profile.birthDate);
     state.profile.height = parseFloat(document.getElementById('p-height').value) || null;
     state.profile.gender = document.getElementById('p-gender').value || null;
     state.profile.currentWeight = parseFloat(document.getElementById('p-curr').value) || state.profile.currentWeight;
