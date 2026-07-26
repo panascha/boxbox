@@ -2789,9 +2789,9 @@ ${trendLines}
 
       const currentTab = document.querySelector('.tab-btn.active').dataset.tab;
       let extractFn;
-      if (currentTab === 'cardio') extractFn = extractWorkoutPhoto;
+      if (currentTab === 'cardio') extractFn = extractFromPhoto;
       else if (currentTab === 'food') extractFn = extractFoodPhoto;
-      else if (currentTab === 'coach') extractFn = extractWorkoutPhoto;
+      else if (currentTab === 'coach') extractFn = extractFromPhoto;
       else { console.log('chat photo upload skipped: unsupported tab'); return; }
 
       const overlay = document.getElementById('photo-overlay');
