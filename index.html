@@ -2791,7 +2791,8 @@ ${trendLines}
       let extractFn;
       if (currentTab === 'cardio') extractFn = extractWorkoutPhoto;
       else if (currentTab === 'food') extractFn = extractFoodPhoto;
-      else { console.log('chat photo upload skipped: not on cardio/food tab'); return; }
+      else if (currentTab === 'coach') extractFn = extractWorkoutPhoto;
+      else { console.log('chat photo upload skipped: unsupported tab'); return; }
 
       const overlay = document.getElementById('photo-overlay');
       overlay.classList.add('active');
