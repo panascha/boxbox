@@ -2732,9 +2732,13 @@ ${trendLines}
     if (!el) return;
     if (!chatHistory.length) return;
 
-    el.innerHTML = chatHistory.map(m => `
-      <div class="chat-msg ${m.role}">${m.role === 'bot' ? mdToHtml(m.text) : '<div class="user-msg">' + escapeHtml(m.text) + '</div>'}</div>
-    `).join('');
+    el.innerHTML = chatHistory.map(m => {
+      if (m.html) {
+        // Rich HTML message (draft review cards)
+        return `<div class="chat-msg ${m.role}">${m.html}</div>`;
+      }
+      return `<div class="chat-msg ${m.role}">${m.role === 'bot' ? mdToHtml(m.text) : '<div class="user-msg">' + escapeHtml(m.text) + '</div>'}</div>`;
+    }).join('');
 
     // Scroll to bottom
     el.scrollTop = el.scrollHeight;
@@ -2753,6 +2757,53 @@ ${trendLines}
     if (!text) return;
 
     input.value = '';
+
+    // If draft pending, treat as correction request
+    if (state.pendingChatDraft) {
+      chatHistory.push({ role: 'user', text });
+      saveChatHistory();
+      renderChatMessages();
+      showTyping();
+
+      const draft = state.pendingChatDraft;
+      const correctionPrompt = `อัปเดตข้อมูลนี้ตามคำขอของผู้ใช้:
+
+ข้อมูลปัจจุบัน:
+${JSON.stringify(draft.data, null, 2)}
+
+คำขอแก้ไข: ${text}
+
+ตอบกลับด้วย JSON ที่อัปเดตแล้วเท่านั้น ไม่ต้องมีคำอธิบายเพิ่มเติม ให้ผลลัพธ์เป็น JSON object ที่มีโครงสร้างเดียวกับข้อมูลเดิม`;
+
+      const contents = [{ role: 'user', parts: [{ text: correctionPrompt }] }];
+      const result = await callGemini('auto', contents, 'คุณเป็นผู้ช่วยที่แปลงคำขอแก้ไขข้อมูลเป็น JSON กรุณาตอบด้วย JSON เท่านั้น');
+      hideTyping();
+
+      if (result.error) {
+        chatHistory.push({ role: 'bot', text: `⚠️ ไม่สามารถแก้ไขข้อมูลได้: ${result.error}` });
+      } else {
+        try {
+          // Parse corrected data
+          let corrected = result.text.trim();
+          // Strip markdown code fence if present
+          if (corrected.startsWith('```')) {
+            corrected = corrected.replace(/^```(?:json)?\n/, '').replace(/\n```$/, '');
+          }
+          const updated = JSON.parse(corrected);
+          state.pendingChatDraft.data = updated;
+          renderChatDraftReviewCard();
+          chatHistory.push({ role: 'bot', text: '✅ อัปเดตข้อมูลแล้ว กรุณาตรวจสอบด้านบน' });
+        } catch (e) {
+          console.error('parse corrected data failed:', e);
+          chatHistory.push({ role: 'bot', text: '⚠️ แก้ไขข้อมูลไม่สำเร็จ กรุณาลองใหม่' });
+        }
+      }
+      saveChatHistory();
+      renderChatMessages();
+      return;
+    }
+
+    // Normal chat flow
     chatHistory.push({ role: 'user', text });
     saveChatHistory();
     renderChatMessages();
@@ -2782,17 +2833,64 @@ ${trendLines}
   }
 
   // ---------- chat photo draft workflow ----------
+  function formatChatDraftData(draft) {
+    if (!draft || !draft.data) return '';
+    const d = draft.data;
+    const type = draft.type;
+
+    if (type === 'cardio') {
+      const parts = [];
+      if (d.distance) parts.push(`${d.distance} km`);
+      if (d.duration) parts.push(fmtDuration(d.duration));
+      if (d.pace) parts.push(`Pace ${fmtDuration(d.pace)}/km`);
+      if (d.avgHR) parts.push(`HR ${d.avgHR} bpm`);
+      if (d.notes) parts.push(`หมายเหตุ: ${d.notes}`);
+      return parts.length ? '📸 พบข้อมูลการวิ่ง: ' + parts.join(' / ') : 'ไม่พบข้อมูล';
+    }
+
+    if (type === 'food') {
+      if (!d.items || !d.items.length) return 'ไม่พบรายการอาหาร';
+      const total = d.items.reduce((sum, it) => sum + (it.cal || 0), 0);
+      const totalP = d.items.reduce((sum, it) => sum + (it.protein || 0), 0);
+      const itemList = d.items.map(it => `- ${it.item}: ${it.cal || 0} kcal, ${it.protein || 0}g โปรตีน`).join('\n');
+      return `🍽️ พบรายการอาหาร ${d.items.length} รายการ:\n${itemList}\n\n📊 รวม: ${total} kcal / ${totalP}g โปรตีน`;
+    }
+
+    if (type === 'gym') {
+      if (!d.exercises || !d.exercises.length) return 'ไม่พบรายการออกกำลังกาย';
+      const exList = d.exercises.map(ex => `- ${ex.name}: ${ex.sets || 0} sets × ${ex.reps || 0} reps @ ${ex.weight || 0} kg`).join('\n');
+      return `🏋️ พบรายการออกกำลังกาย ${d.exercises.length} รายการ:\n${exList}`;
+    }
+
+    if (type === 'weight') {
+      return `⚖️ พบน้ำหนัก: ${d.weight || 0} kg` + (d.date ? ` (${d.date})` : '');
+    }
+
+    return JSON.stringify(d);
+  }
+
   async function handleChatPhotoUpload(input) {
     try {
       const files = Array.from(input.files || []);
       if (!files.length) return;
 
+      const file = files[0];
       const currentTab = document.querySelector('.tab-btn.active').dataset.tab;
       let extractFn;
       if (currentTab === 'cardio') extractFn = extractFromPhoto;
       else if (currentTab === 'food') extractFn = extractFoodPhoto;
       else if (currentTab === 'coach') extractFn = extractFromPhoto;
       else { console.log('chat photo upload skipped: unsupported tab'); return; }
+
+      // Show image preview in chat before extraction
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const imgHtml = `<img src="${e.target.result}" style="max-width: 100%; border-radius: 8px; margin-top: 8px;" />`;
+        chatHistory.push({ role: 'user', html: imgHtml });
+        saveChatHistory();
+        renderChatMessages();
+      };
+      reader.readAsDataURL(file);
 
       const overlay = document.getElementById('photo-overlay');
       overlay.classList.add('active');
@@ -2812,28 +2910,24 @@ ${trendLines}
   }
 
   function renderChatDraftReviewCard() {
-    const el = document.getElementById('chat-msgs');
-    if (!el) return;
-
-    const existing = document.getElementById('chat-draft-review');
-    if (existing) existing.remove();
-
-    const div = document.createElement('div');
-    div.id = 'chat-draft-review';
-    div.className = 'chat-draft-review';
-
     const draft = state.pendingChatDraft;
     if (!draft) return;
-    const dataJson = JSON.stringify(draft.data);
-    div.innerHTML =
+
+    // Remove any existing draft message from chatHistory
+    chatHistory = chatHistory.filter(m => !m.isDraft);
+
+    const formatted = formatChatDraftData(draft);
+    const html =
       '<div class="draft-header">รีวิวข้อมูลจากรูป</div>' +
-      '<div class="draft-content">' + dataJson + '</div>' +
+      '<div class="draft-content" style="white-space: pre-wrap;">' + escapeHtml(formatted) + '</div>' +
       '<div class="draft-actions">' +
         '<button onclick="confirmChatDraft()">ยืนยัน</button>' +
         '<button onclick="cancelChatDraft()">ยกเลิก</button>' +
+        '<button onclick="editChatDraft()">แก้ไข</button>' +
       '</div>';
-    el.appendChild(div);
-    el.scrollTop = el.scrollHeight;
+
+    chatHistory.push({ role: 'bot', html, isDraft: true });
+    renderChatMessages();
   }
 
   async function confirmChatDraft() {
@@ -2855,8 +2949,9 @@ ${trendLines}
       }
 
       state.pendingChatDraft = null;
-      const reviewCard = document.getElementById('chat-draft-review');
-      if (reviewCard) reviewCard.remove();
+      chatHistory = chatHistory.filter(m => !m.isDraft);
+      saveChatHistory();
+      renderChatMessages();
       toast('✅ บันทึกข้อมูลสำเร็จ');
     } catch (e) {
       console.error('confirm draft failed:', e);
@@ -2866,9 +2961,19 @@ ${trendLines}
 
   function cancelChatDraft() {
     state.pendingChatDraft = null;
-    const reviewCard = document.getElementById('chat-draft-review');
-    if (reviewCard) reviewCard.remove();
+    chatHistory = chatHistory.filter(m => !m.isDraft);
+    saveChatHistory();
+    renderChatMessages();
     toast('ยกเลิกการบันทึก');
+  }
+
+  function editChatDraft() {
+    if (!state.pendingChatDraft) return;
+    const input = document.getElementById('coach-input');
+    if (input) {
+      input.focus();
+      toast('💬 พิมพ์คำสั่งแก้ไขข้อมูล เช่น "เปลี่ยนระยะทางเป็น 6 km" หรือ "เพิ่ม HR เป็น 155"');
+    }
   }
 
   async function sendProactiveSuggestion() {
