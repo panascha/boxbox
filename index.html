@@ -1725,6 +1725,7 @@
 - Treadmill LCD: look for TIME (durationMin), DIST (km), SPEED, CAL, INCL (incline level → ถ้าเห็น INCL L20 = เดินขึ้นเนิน)
 - ถ้ามีเวลา + pace แต่ไม่มีระยะทาง → คำนวณ distanceKm = durationMin / (paceMinPerKm)
   เช่น 79.85 นาที pace 10:24/km → 79.85 / 10.4 = 7.68 km
+- ถ้ามีวันที่ในรูป (เช่น 2026/07/21, 21/07/2026, July 21 2026) ให้แปลงเป็น YYYY-MM-DD
 
 ตอบเป็น JSON เท่านั้น (ห้ามตอบอย่างอื่น):
 {
@@ -1732,6 +1733,7 @@
   "distanceKm": ตัวเลข (km),
   "durationMin": ตัวเลข (นาที) — แปลง MM:SS เป็นนาทีทศนิยม เช่น 53:57 = 53.95,
   "avgHr": ตัวเลข (bpm) หรือ null,
+  "date": "YYYY-MM-DD string extracted from photo timestamp (e.g., 2026/07/21 -> 2026-07-21), or null if not found",
   "notes": "ข้อมูลเพิ่มเติมจากรูป เช่น incline level, calories, pace เฉลี่ย หรือ null"
 }
 ถ้าอ่านค่าไหนไม่ได้ ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
@@ -1757,7 +1759,7 @@
 
         const entry = {
           id: uid(),
-          date: todayStr(),
+          date: (json.date && typeof json.date === 'string') ? json.date : todayStr(),
           type: json.type || 'วิ่ง',
           distanceKm: Number(json.distanceKm) || 0,
           durationMin: Number(json.durationMin) || 0,
@@ -1780,8 +1782,24 @@
 
     if (added.length) {
       save('cardio-logs', state.cardio);
-      toast(`เพิ่มบันทึกคาร์ดิโอ ${added.length} รายการแล้ว`);
       renderCardio();
+      // Populate form with last parsed entry so user can review/adjust before saving
+      const draft = added[added.length - 1];
+      const cDate = document.getElementById('c-date');
+      const cType = document.getElementById('c-type');
+      const cDist = document.getElementById('c-dist');
+      const cDur = document.getElementById('c-dur');
+      const cHr = document.getElementById('c-hr');
+      const cNotes = document.getElementById('c-notes');
+      if (draft.date && cDate) cDate.value = draft.date;
+      if (draft.type && cType) { try { cType.value = draft.type; } catch (e) {} }
+      if (draft.distanceKm && cDist) cDist.value = draft.distanceKm;
+      if (draft.durationMin && cDur) cDur.value = fmtDuration(draft.durationMin);
+      if (draft.avgHr && cHr) cHr.value = draft.avgHr;
+      if (draft.notes && cNotes) cNotes.value = draft.notes;
+      st.textContent = `✅ อ่านค่าแล้ว (${added.length} รูป) — ตรวจสอบแล้วกด 'บันทึกกิจกรรมคาร์ดิโอ' อีกครั้งหรือแก้ก่อนบันทึก`;
+      st.style.display = 'block';
+      toast(`อ่านค่าจากรูปแล้ว — ตรวจสอบก่อนกดบันทึกอีกครั้ง`);
     } else {
       toast('ไม่พบข้อมูลคาร์ดิโอจากรูปใดๆ');
     }
