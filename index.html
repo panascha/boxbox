@@ -1333,6 +1333,210 @@
     return `<div class="entry"><div><div class="entry-main">${r.label || 'มื้ออาหาร'} · ${r.calories || 0} kcal</div><div class="entry-meta">${fmtDate(r.date)} ${r.time || ''}</div></div><span class="badge rose">food</span></div>`;
   }
 
+  // ---------- Weekly Digest & Auto-Calibrator ----------
+
+  // Compute averages & progress metrics for the past 7 days
+  function computeWeeklyMetrics() {
+    const today = todayStr();
+    const start = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
+    const dateInRange = (d) => d >= start && d <= today;
+
+    const weekFood = state.food.filter(f => dateInRange(f.date));
+    const weekCardio = state.cardio.filter(c => dateInRange(c.date));
+    const weekGym = state.gym.filter(g => dateInRange(g.date));
+    const weekWeight = [...state.weightLog].filter(e => dateInRange(e.date)).sort((a, b) => a.date.localeCompare(b.date));
+    const daysWithFood = new Set(weekFood.map(f => f.date)).size || 1;
+
+    const totalCal = weekFood.reduce((s, f) => s + Number(f.calories || 0), 0);
+    const totalProt = weekFood.reduce((s, f) => s + Number(f.protein || 0), 0);
+    const avgCal = Math.round(totalCal / daysWithFood);
+    const avgProt = Math.round(totalProt / daysWithFood);
+
+    // Weight change: latest weight vs oldest weight in window, fallback to profile
+    let weightChange = 0;
+    let weightStart = null;
+    let weightEnd = null;
+    if (weekWeight.length >= 2) {
+      weightStart = weekWeight[0].weight;
+      weightEnd = weekWeight[weekWeight.length - 1].weight;
+    } else if (weekWeight.length === 1) {
+      weightStart = state.profile.currentWeight || weekWeight[0].weight;
+      weightEnd = weekWeight[0].weight;
+    } else if (state.profile.currentWeight) {
+      weightStart = state.profile.currentWeight;
+      weightEnd = state.profile.currentWeight;
+    }
+    if (weightStart != null && weightEnd != null) {
+      weightChange = +(weightEnd - weightStart).toFixed(1);
+    }
+
+    // Progress rate vs deadline
+    let deadlineWeeks = null;
+    let weeklyNeeded = null;
+    let behindPace = null;
+    const p = state.profile || {};
+    if (p.deadline && p.currentWeight != null && p.weightGoal != null) {
+      const daysRemaining = daysBetween(today, p.deadline);
+      deadlineWeeks = Math.round((daysRemaining / 7) * 10) / 10;
+      const kgRemaining = p.currentWeight - p.weightGoal;
+      weeklyNeeded = Math.round((kgRemaining / Math.max(deadlineWeeks, 1)) * 10) / 10;
+      // Actual rate per week (avoid div by 0)
+      const actualWeeksLogged = Math.max(daysWithFood / 7, 0.5);
+      const actualWeekly = weightChange / actualWeeksLogged;
+      // "behind pace" = actual rate < needed rate (for both losing & gaining, sign-aware)
+      behindPace = (p.currentWeight >= p.weightGoal)
+        ? (actualWeekly < weeklyNeeded)   // losing: slower drop = bad
+        : (actualWeekly > weeklyNeeded);   // gaining: slower gain = bad
+    }
+
+    return {
+      avgCal, avgProt,
+      cardioCount: weekCardio.length,
+      gymCount: weekGym.length,
+      weightChange, weightStart, weightEnd,
+      daysWithFood,
+      deadlineWeeks, weeklyNeeded, behindPace,
+      start, end: today
+    };
+  }
+
+  // Generate a rule-based recommendation for next week's calorieTarget / proteinTarget
+  function generateWeeklyRecommendation(m) {
+    const p = state.profile || {};
+    const curCal = Number(p.calorieTarget) || 0;
+    const curProt = Number(p.proteinTarget) || 0;
+    let recCal = curCal;
+    let recProt = curProt;
+    let headline = '';
+    let detail = '';
+    let badgeClass = 'moss';
+
+    if (!curCal || !curProt || !p.weightGoal) {
+      headline = 'ยังขาดข้อมูลเป้าหมาย — กรุณาตั้งค่าเดดไลน์/น้ำหนักเป้าหมายก่อน';
+      detail = 'ไปที่แท็บ ⚙️ ตั้งค่า เพื่อใส่เป้าหมายและเดดไลน์';
+      badgeClass = 'rose';
+      return { recCal: null, recProt: null, headline, detail, badgeClass, insufficientData: true };
+    }
+
+    const isLosing = p.currentWeight > p.weightGoal;
+    const absChange = Math.abs(m.weightChange);
+    const plateau = absChange < 0.2;
+    const onTrack = !m.behindPace && !plateau;
+
+    if (onTrack && m.weightStart != null && m.weightEnd != null) {
+      headline = isLosing ? 'น้ำหนักลดลงตามแผน! รักษาเป้าหมายเดิม' : 'น้ำหนักเพิ่มขึ้นตามแผน! รักษาเป้าหมายเดิม';
+      const sign = isLosing ? '↓' : '↑';
+      detail = `น้ำหนักเปลี่ยน ${sign}${absChange.toFixed(1)} kg ใน 7 วัน — ปรับแคลอรี่ ${curCal} kcal · โปรตีน ${curProt}g ให้เหมาะสมกับรอบเดือนและรอบเดดไลน์`;
+      recCal = curCal;
+      recProt = curProt;
+    } else if (plateau && m.daysWithFood >= 4) {
+      // Plateau: adjust for momentum
+      if (isLosing) {
+        recCal = Math.max(curCal - 120, Number(p.tdee || curCal) * 0.75 | 0);
+        recProt = curProt + 10;
+        badgeClass = Math.abs((p.currentWeight || 0) - p.weightGoal) > 5 ? 'rose' : 'ember';
+        headline = 'น้ำหนักนิ่ง 2 สัปดาห์ — ลดแคลอรี่เบาๆ';
+        detail = `ปรับแคลอรี่ ↓120 kcal + เป้าโปรตีน +10g เพื่อข้าม plateau`;
+      } else {
+        // Gaining plateau
+        recCal = curCal + 150;
+        recProt = curProt + 5;
+        badgeClass = Math.abs((p.currentWeight || 0) - p.weightGoal) > 5 ? 'ember' : 'rose';
+        headline = 'น้ำหนักนิ่ง 2 สัปดาห์ — เพิ่มแคลอรี่เบาๆ';
+        detail = `ปรับแคลอรี่ ↑150 kcal + เป้าโปรตีน +5g เพื่อข้าม plateau`;
+      }
+    } else if (m.behindPace && m.deadlineWeeks != null) {
+      if (isLosing) {
+        recCal = Math.max(curCal - 180, Number(p.tdee || curCal) * 0.7 | 0);
+        recProt = curProt + 15;
+        badgeClass = 'rose';
+        headline = 'ช้ากว่าเดดไลน์ — กระชับแคลอรี่ให้ชัดขึ้น';
+        detail = `เหลือ ${m.deadlineWeeks.toFixed(1)} สัปดาห์ · ต้องการ ${m.weeklyNeeded != null ? m.weeklyNeeded + ' kg/สัปดาห์' : '—'} แต่ลงช้ากว่าที่เป้า`;
+      } else {
+        recCal = curCal + 200;
+        recProt = curProt + 10;
+        badgeClass = 'rose';
+        headline = 'เพิ่มน้ำหนักช้ากว่าที่เป้า — เพิ่มแคลอรี่+โปรตีน';
+        detail = `เหลือ ${m.deadlineWeeks.toFixed(1)} สัปดาห์ · ต้องการ ${m.weeklyNeeded != null ? m.weeklyNeeded + ' kg/สัปดาห์' : '—'} แต่เพิ่มช้ากว่าที่เป้า`;
+      }
+    } else {
+      headline = 'ยังไม่สามารถประเมินได้ — บันทึกอาหาร/น้ำหนักต่อเนื่อง 7 วัน';
+      detail = 'ยิ่งบันทึกครบทุกวัน AI จะยิ่งแนะนำแม่นยำขึ้น';
+      badgeClass = 'ember';
+      recCal = null;
+      recProt = null;
+    }
+
+    // Clamp calorie target: at least TDEE * 0.7, and never exceed TDEE (for losing) or TDEE * 1.5 (for gaining)
+    if (recCal != null && p.tdee) {
+      const minCal = Math.round(p.tdee * 0.7);
+      const maxCal = isLosing ? Math.round(p.tdee) : Math.round(p.tdee * 1.5);
+      recCal = Math.max(minCal, Math.min(maxCal, recCal));
+    }
+    if (recProt != null) recProt = Math.max(40, Math.min(250, recProt));
+
+    return { recCal, recProt, headline, detail, badgeClass, insufficientData: recCal == null };
+  }
+
+  // Render the weekly digest card HTML (or empty string if not shown)
+  function weeklyDigestCard() {
+    const today = new Date();
+    const isSunday = today.getDay() === 0;
+    const p = state.profile || {};
+    // Show if: (today is Sunday) OR (weight-log has entries spanning ≥7 days) OR (food-log has > 30 entries)
+    const hasLongHistory = state.weightLog.length >= 2 || state.food.length >= 30 || isSunday;
+    if (!hasLongHistory) return '';
+
+    const m = computeWeeklyMetrics();
+    const rec = generateWeeklyRecommendation(m);
+
+    // Stats row
+    const stats = [];
+    if (m.avgCal) stats.push({ n: `${m.avgCal}<span style="font-size:10px;color:var(--text-dim);">/${p.calorieTarget || '—'}</span>`, l: 'แคลอรี่เฉลี่ย/วัน' });
+    if (m.avgProt) stats.push({ n: `${m.avgProt}<span style="font-size:10px;color:var(--text-dim);">/${p.proteinTarget ? p.proteinTarget + 'g' : '—'}</span>`, l: 'โปรตีนเฉลี่ย/วัน' });
+    stats.push({ n: m.cardioCount + ' ครั้ง', l: 'คาร์ดิโอ (7 วัน)' });
+    stats.push({ n: m.gymCount + ' ครั้ง', l: 'ยิม (7 วัน)' });
+    if (m.weightChange !== 0 && m.weightStart != null) {
+      const arrow = m.weightChange > 0 ? '↑' : '↓';
+      const color = ((p.weightGoal != null && p.currentWeight > p.weightGoal) ? m.weightChange < 0 : m.weightChange > 0) ? 'var(--moss)' : 'var(--ember)';
+      stats.push({ n: `<span style="color:${color};">${arrow}${Math.abs(m.weightChange).toFixed(1)} kg</span>`, l: `น้ำหนัก (7 วัน)` });
+    }
+
+    const statsHtml = stats.map(s => `<div class="stat"><div class="n">${s.n}</div><div class="l">${s.l}</div></div>`).join('');
+
+    // Recommendation block & calibrate button
+    let recHtml = '';
+    if (!rec.insufficientData) {
+      const calibDisabled = (Number(rec.recCal) === Number(p.calorieTarget) && Number(rec.recProt) === Number(p.proteinTarget));
+      recHtml = `
+        <div style="margin-top:10px; padding:10px; background:var(--${rec.badgeClass === 'moss' ? 'moss-dim' : rec.badgeClass === 'ember' ? 'ember-dim' : 'rose-dim'}); border-radius:10px; border:1px solid var(--${rec.badgeClass === 'moss' ? 'moss' : rec.badgeClass === 'ember' ? 'ember' : 'rose'});">
+          <div style="font-weight:700; margin-bottom:4px; color:var(--${rec.badgeClass === 'moss' ? 'moss' : rec.badgeClass === 'ember' ? 'ember' : 'rose'});">💡 ${rec.headline}</div>
+          <div style="font-size:11px; line-height:1.5; color:var(--text-dim);">${rec.detail}</div>
+          ${rec.recCal != null ? `<button class="primary" style="margin-top:8px; ${calibDisabled ? 'opacity:0.5;pointer-events:none;' : ''}" onclick="applyWeeklyCalibration(${rec.recCal}, ${rec.recProt})">${calibDisabled ? '✅ เป้าหมายสัปดาห์หน้าตรงกับที่แนะนำแล้ว' : 'อัปเดตเป้าหมายสัปดาห์หน้าตาม AI แนะนำ'}</button>` : ''}
+        </div>`;
+    } else {
+      recHtml = `<div style="margin-top:10px; font-size:11px; color:var(--text-dim); line-height:1.4;">💡 ${rec.headline} — ${rec.detail}</div>`;
+    }
+
+    return `
+    <div class="card">
+      <h2>📊 สรุปผลประจำสัปดาห์ <span class="badge moss">${m.start} → ${m.end}</span></h2>
+      <div class="stat-grid">${statsHtml}</div>
+      ${recHtml}
+    </div>`;
+  }
+
+  // Auto-calibrator: update profile targets with the recommended values
+  function applyWeeklyCalibration(newCal, newProt) {
+    const p = state.profile || {};
+    p.calorieTarget = Number(newCal);
+    p.proteinTarget = Number(newProt);
+    state.profile = p;
+    save('profile', p);
+    toast(`อัปเดตเป้าหมายแคลอรี่และโปรตีนเรียบร้อย! (${newCal} kcal / ${newProt}g)`);
+    renderOverview();
+  }
+
   // ---------- render: cardio ----------
 
   function renderCardio() {
