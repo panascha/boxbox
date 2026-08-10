@@ -958,7 +958,7 @@
       this.token = null; this.tokenExpiry = 0; this.connected = false;
       this.fileId = null; this.userEmail = ''; this.status = 'idle';
       clearTimeout(this._debounce);
-      renderSettings();
+      refreshIfActive('settings');
     },
 
     async _ensure() {
@@ -984,7 +984,7 @@
     async push() {
       if (!this.connected || !this.fileId) return;
       if (!(await this._ensure())) return;
-      this.status = 'syncing'; renderSettings();
+      this.status = 'syncing'; refreshIfActive('settings');
       try {
         const meta = { name:'boxbox-backup.json', mimeType:'application/json' };
         const fd = new FormData();
@@ -996,13 +996,13 @@
         this.lastSync = new Date().toISOString(); localStorage.setItem('_lastSync', this.lastSync);
         this.status = 'online';
       } catch(e) { this.status = navigator.onLine ? 'error' : 'offline'; }
-      renderSettings();
+      refreshIfActive('settings');
     },
 
     async pull() {
       if (!this.connected || !this.fileId) return;
       if (!(await this._ensure())) return;
-      this.status = 'syncing'; renderSettings();
+      this.status = 'syncing'; refreshIfActive('settings');
       try {
         const r = await fetch(`https://www.googleapis.com/drive/v3/files/${this.fileId}?alt=media`, {
           headers:{Authorization:`Bearer ${this.token}`}
@@ -1013,10 +1013,10 @@
         await loadAll();
         this.lastSync = new Date().toISOString(); localStorage.setItem('_lastSync', this.lastSync);
         this.status = 'online';
-        route('overview');
+        if (activeTab() === 'overview') route('overview');
         toast('ดึงข้อมูลจาก Drive สำเร็จ');
       } catch(e) { this.status = navigator.onLine ? 'error' : 'offline'; }
-      renderSettings();
+      refreshIfActive('settings');
     },
 
     renderStatus() {
@@ -1038,7 +1038,8 @@
   let state = { profile: null, cardio: [], gym: [], food: [], cycle: null, eatingSeq: [false, false, false, false], weightLog: [], pendingChatDraft: null };
 
   function save(key, val) {
-    try { dataStore.set(key, val); } catch (e) { toast('บันทึกไม่สำเร็จ ลองใหม่'); }
+    try { dataStore.set(key, val); return true; }
+    catch (e) { toast('บันทึกไม่สำเร็จ ลองใหม่'); return false; }
   }
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
@@ -1701,7 +1702,24 @@
   function paceStr(distanceKm, durationMin) {
     const paceMin = distanceKm ? durationMin / distanceKm : 0;
     if (!paceMin || !isFinite(paceMin)) return '';
-    return `${Math.floor(paceMin)}:${Math.round((paceMin % 1) * 60).toString().padStart(2, '0')}`;
+    const totalSec = Math.round(paceMin * 60);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  // Single constructor — every site that builds a cardio entry must use this.
+  function makeCardioEntry({ date, type, distanceKm, durationMin, avgHr, notes }) {
+    return {
+      id: uid(),
+      date: date || todayStr(),
+      type: type || 'วิ่ง',
+      distanceKm: Number(distanceKm) || 0,
+      durationMin: Number(durationMin) || 0,
+      pace: paceStr(Number(distanceKm) || 0, Number(durationMin) || 0),
+      avgHr: avgHr || null,
+      notes: notes || ''
+    };
   }
 
   // Resize an image File to a JPEG data URL (≤ maxDim on the longest side).
@@ -1774,34 +1792,26 @@
 ถ้าอ่านค่าไหนไม่ได้ ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
 
         const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-        const result = await callGemini('auto', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
-
-        if (result.error) {
-          console.warn('extractFromPhoto error for file', file.name, result.error);
+        const res = await callGeminiJSON(contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
+        if (res.error) {
+          console.warn('extractFromPhoto error for file', file.name, res.error, res.raw);
+          continue;
+        }
+        const json = res.json;
+        // ไม่มีทั้งระยะทางและเวลา = อ่านรูปไม่ได้จริง — ข้ามไป ไม่สร้าง entry ที่เป็น 0 ทั้งหมด
+        if (!json || (!Number(json.distanceKm) && !Number(json.durationMin))) {
+          console.warn('no cardio data extracted from', file.name);
           continue;
         }
 
-        let json = parseGeminiJSON(result.text);
-        if (!json) {
-          const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: 'ตอบเป็น JSON object เท่านั้น ไม่ต้องอธิบาย:\n' + result.text.replace(/\{[\s\S]*\}/, '').slice(0, 500) }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
-          if (!retry.error) json = parseGeminiJSON(retry.text);
-        }
-
-        if (!json) {
-          console.warn('Could not parse JSON from image', file.name);
-          continue;
-        }
-
-        const entry = {
-          id: uid(),
+        const entry = makeCardioEntry({
           date: (json.date && typeof json.date === 'string') ? json.date : todayStr(),
           type: json.type || 'วิ่ง',
           distanceKm: Number(json.distanceKm) || 0,
           durationMin: Number(json.durationMin) || 0,
-          pace: paceStr(Number(json.distanceKm) || 0, Number(json.durationMin) || 0),
           avgHr: json.avgHr || null,
           notes: json.notes || ''
-        };
+        });
 
         added.push(entry);
 
@@ -1816,7 +1826,7 @@
 
     if (added.length === 1) {
       // รูปเดียว: เติมฟอร์มให้ตรวจก่อน ยังไม่บันทึกลง log (กันบันทึกซ้ำตอนกดปุ่มบันทึก)
-      renderCardio();
+      refreshIfActive('cardio');
       const draft = added[0];
       const cDate = document.getElementById('c-date');
       const cType = document.getElementById('c-type');
@@ -1836,7 +1846,7 @@
       // หลายรูป: ฟอร์มเดียวรับได้รูปเดียว จึงบันทึกทั้งหมดเลย
       state.cardio.push(...added);
       save('cardio-logs', state.cardio);
-      renderCardio();
+      refreshIfActive('cardio');
       setPhotoStatus(`✅ บันทึกแล้ว ${added.length} รายการจากรูป`);
       toast(`บันทึก ${added.length} รายการจากรูปแล้ว`);
     } else {
@@ -1870,41 +1880,18 @@ async function extractFoodPhoto(input) {
         const prompt = `มองภาพนี้ — อาจเป็นรูปเมนูร้านอาหาร, ภาพหน้าจอแอพส่งอาหาร (Grab/Lineman/ShopeeFood/foodpanda/UberEats) หรือใบเสร็จสั่งอาหาร\n\nอ่านรายการอาหารที่สั่ง/อยู่ในภาพ:\n- ระบุชื่อเมนูเป็นภาษาไทย\n- ระบุจำนวน (เช่น 2 กล่อง, 1 จาน)\n- ประเมินแคลอรี่และโปรตีนต่อ 1 ส่วน (standard serving) ตามข้อมูลที่ค้นได้หรือค่าเฉลี่ยที่เชื่อถือได้\n- ถ้าเห็นราคา/ขนาดที่ระบุไว้ ให้ใช้เพื่อปรับค่าให้ใกล้เคียง\n\nตอบเป็น JSON array [] เท่านั้น ห้ามอธิบายหรือคำอื่น ๆ:\n[\n  {\n    "label": "ชื่อเมนู เช่น ข้าวมันไก่",\n    "qty": 1,\n    "calories": 550,\n    "protein": 30\n  }\n]\nถ้าอ่านไม่ได้เลย ให้ตอบ []`;
 
         const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-        let result = await callGemini('auto', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
+        const res = await callGeminiJSON(contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
 
-        if (result.error) {
-          console.warn('extractFoodPhoto error for file', file.name, result.error);
+        try { localStorage.setItem('_last_ai_meta', JSON.stringify({ endpoint: 'extractFoodPhoto', model: res.modelUsed || null, text: sanitizeSnippet(res.text || res.raw, 1200), time: Date.now() })); } catch (e) {}
+
+        if (res.error) {
+          console.warn('extractFoodPhoto error for file', file.name, res.error);
           continue;
         }
 
-        try { localStorage.setItem('_last_ai_meta', JSON.stringify({ endpoint: 'extractFoodPhoto', model: result.modelUsed || null, text: sanitizeSnippet(result.text, 1200), time: Date.now() })); } catch (e) {}
-
-        let items = parseGeminiJSON(result.text);
-        if (!Array.isArray(items)) items = null;
-
-        if (!items) {
-          const retryMsg = 'ส่ง JSON array [] กลับมาอย่างเท่านั้น ห้ามมีคำอธิบายหรือข้อความอื่น\nข้อความเดิม:\n' + sanitizeSnippet(result.text, 800);
-          const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: retryMsg }] }], null, { temperature: 0.0, maxOutputTokens: 2048 });
-          if (!retry.error) {
-            let r2 = parseGeminiJSON(retry.text);
-            if (Array.isArray(r2)) items = r2;
-            if (!items && retry.text) {
-              const am = retry.text.match(/\[[\s\S]*\]/);
-              if (am) {
-                try {
-                  let tmp = String(am[0]).replace(/```[\s\S]*?```/g, '');
-                  tmp = tmp.replace(/(\{|,|:)\s*'([^']*)'(?=\s*[:,\])]|$)/g, (_, p1, p2) => `${p1} "${p2}"`);
-                  tmp = tmp.replace(/,\s*([\]}])/g, '$1');
-                  items = JSON.parse(tmp);
-                  if (!Array.isArray(items)) items = null;
-                } catch (e) { try { localStorage.setItem('_last_ai_parse_retry_raw', String(retry.text).slice(0, 1200)); } catch (e2) {} }
-              }
-            }
-            try { localStorage.setItem('_last_ai_meta_retry', JSON.stringify({ model: retry.modelUsed || null, text: sanitizeSnippet(retry.text, 1200), time: Date.now() })); } catch (e) {}
-          }
-        }
-
-        if (!items || !Array.isArray(items) || !items.length) {
+        // prompt ขอ array — object เดี่ยวถือว่าอ่านไม่ได้ ข้ามรูปนี้ไป
+        const items = Array.isArray(res.json) ? res.json : null;
+        if (!items || !items.length) {
           continue; // non-fatal — skip this image, keep processing others
         }
         aggregated.push(...items);
@@ -1940,16 +1927,14 @@ async function extractFoodPhoto(input) {
     const dist = parseFloat(document.getElementById('c-dist').value);
     const dur = parseDuration(document.getElementById('c-dur').value);
     if (!dist || !dur) { toast('กรุณากรอกระยะทางและระยะเวลา'); return; }
-    const paceMin = dur / dist;
-    const m = Math.floor(paceMin); const s = Math.round((paceMin - m) * 60);
-    const entry = {
-      id: uid(), date: document.getElementById('c-date').value,
+    const entry = makeCardioEntry({
+      date: document.getElementById('c-date').value,
       type: document.getElementById('c-type').value,
-      distanceKm: dist, durationMin: dur,
-      pace: `${m}:${s.toString().padStart(2, '0')}`,
+      distanceKm: dist,
+      durationMin: dur,
       avgHr: document.getElementById('c-hr').value,
       notes: document.getElementById('c-notes').value
-    };
+    });
     state.cardio.push(entry);
     save('cardio-logs', state.cardio);
     toast('บันทึกคาร์ดิโอแล้ว');
@@ -2122,25 +2107,17 @@ async function extractFoodPhoto(input) {
     const contents = [{ role: 'user', parts: [{ text: prompt }] }];
     // maxOutputTokens ต้องเผื่อ thinking tokens ด้วย — ถ้าตั้งต่ำ (เช่น 200) โมเดลจะจบด้วย
     // finish=MAX_TOKENS แล้วคืน parts ว่าง ทำให้ router ไล่ทิ้งทุกโมเดลจนขึ้น error.
-    const res = await callGemini('auto', contents, 'ใช้ Google Search เพื่อค้นหาข้อมูลโภชนาการจริง และส่งเฉพาะ JSON ตอบกลับ ไม่มีคำอธิบายเพิ่มเติม', { temperature: 0.0, maxOutputTokens: 2048, tools: [{ google_search: {} }] });
+    const res = await callGeminiJSON(contents, 'ใช้ Google Search เพื่อค้นหาข้อมูลโภชนาการจริง และส่งเฉพาะ JSON ตอบกลับ ไม่มีคำอธิบายเพิ่มเติม', { temperature: 0.0, maxOutputTokens: 2048, tools: [{ google_search: {} }] });
     btn.disabled = false; btn.textContent = old;
     if (res.error) { toast('AI เกิดปัญหา: ' + res.error); return; }
 
-    // Try parse robustly
-    let j = parseGeminiJSON(res.text);
+    let j = res.json;
     if (!j || typeof j.calories !== 'number') {
       // คำตอบแบบ grounded มักมีข้อความ/วงเล็บอ้างอิงปนมา ทำให้ตัวจับ JSON กว้างเกินไป —
       // ดึงเฉพาะ object ที่มี key calories ออกมาก่อน
       const m = String(res.text || '').match(/\{[^{}]*"?calories"?[^{}]*\}/i);
       if (m) j = parseGeminiJSON(m[0]) || j;
     }
-    if (!j || typeof j.calories !== 'number' || typeof j.protein !== 'number') {
-      // Retry: ask model to reformat into strict JSON only
-      const retryPrompt = 'ตอบเป็น JSON object เท่านั้น เช่น {"calories": 123, "protein": 12} — ห้ามมีคำอธิบาย:\n' + res.text.slice(0, 800);
-      const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: retryPrompt }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
-      if (!retry.error) j = parseGeminiJSON(retry.text);
-    }
-
     if (!j || typeof j.calories !== 'number' || typeof j.protein !== 'number') { toast('AI ตอบไม่เป็น JSON'); return; }
     try {
       if (typeof j.calories === 'number') document.getElementById('f-cal').value = Math.round(j.calories);
@@ -2533,6 +2510,29 @@ async function extractFoodPhoto(input) {
       keys.push(first);
       localStorage.setItem('gemini-keys', JSON.stringify(keys));
     }
+  }
+
+  // callGemini wrapper สำหรับ caller ที่ต้องการ JSON: รวม retry ladder ไว้ที่เดียว
+  // คืน { json, modelUsed, text, sources } หรือ { error, raw }
+  // ใช้ชื่อ field เดียวกับ callGemini (modelUsed/text/sources) เพื่อให้ caller เดิม เช่น
+  // renderNutriSource() อ่านค่าได้เหมือนกันโดยไม่ต้องแปลง
+  async function callGeminiJSON(contents, systemInstruction, genConfig) {
+    const result = await callGemini('auto', contents, systemInstruction, genConfig);
+    if (result.error) return { error: result.error };
+
+    // parseGeminiJSON จัดการ markdown fence, bracket-extract, single-quote และ trailing comma ให้แล้ว
+    let json = parseGeminiJSON(result.text);
+    if (json) return { json, modelUsed: result.modelUsed, text: result.text, sources: result.sources };
+
+    // ยังพังอยู่ → ให้โมเดลจัดรูป JSON ใหม่อีกครั้งเดียว
+    const text = String(result.text || '');
+    const retryPrompt = 'ตอบเป็น JSON object/array เท่านั้น ห้ามมีคำอธิบาย:\n' + text.slice(0, 800);
+    const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: retryPrompt }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
+    if (!retry.error) json = parseGeminiJSON(retry.text);
+    // retry ไม่ได้แนบ google_search จึงไม่มี sources — คง sources ของคำตอบแรกไว้เพื่อไม่ให้ที่มาหาย
+    if (json) return { json, modelUsed: retry.modelUsed, text: retry.text, sources: result.sources };
+
+    return { error: 'AI ตอบไม่เป็น JSON', raw: text.slice(0, 500) };
   }
 
   // แหล่งอ้างอิงจาก grounding metadata (เมื่อเรียกด้วย google_search) → [{title, uri}] ไม่ซ้ำ
@@ -2944,6 +2944,12 @@ ${JSON.stringify(draft.items.map(it => it.entry), null, 2)}
 - "food" = รูปอาหาร เมนูร้าน ภาพหน้าจอแอพสั่งอาหาร (Grab/Lineman/ShopeeFood/foodpanda) หรือใบเสร็จ
 - "unknown" = อย่างอื่นที่ไม่เข้าสองประเภทนี้
 
+คำแนะนำพิเศษสำหรับรูปลู่วิ่ง/เครื่องวิ่ง:
+- มองหา TIME/DIST/SPEED/AVG PACE/Avg HR/INCL/INCL L20 (ถ้าเห็น INCL L20 ให้ตีเป็นเดินขึ้นเนิน)
+- ถ้าพบเวลาและเพซแต่ไม่มีระยะ ให้คำนวณ distanceKm = durationMin / (paceMinPerKm)
+  เช่น 79:51 เป็น 79.85 นาที กับเพซ 10:24/km → 79.85 / 10.4 = 7.68 km
+- อย่าเดาระยะหากไม่มีข้อมูลเพียงพอ ให้ใส่ null
+
 ตอบเป็น JSON object เท่านั้น ห้ามมีข้อความอื่น:
 {
   "kind": "cardio" หรือ "food" หรือ "unknown",
@@ -2960,27 +2966,24 @@ ${JSON.stringify(draft.items.map(it => it.entry), null, 2)}
 ใส่เฉพาะ key ที่ตรงกับ kind ที่เลือก ถ้าอ่านค่าไหนไม่ได้ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
 
     const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
-    const result = await callGemini('auto', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
-    if (result.error) { console.warn('classifyAndExtractPhoto error', result.error); return null; }
-
-    const json = parseGeminiJSON(result.text);
-    if (!json || !json.kind) { console.warn('classifyAndExtractPhoto: unparsable', result.text); return null; }
+    const res = await callGeminiJSON(contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
+    if (res.error) { console.warn('classifyAndExtractPhoto error', res.error); return null; }
+    const json = res.json;
+    if (!json || !json.kind) { console.warn('classifyAndExtractPhoto: unparsable', res.text); return null; }
 
     if (json.kind === 'cardio' && json.cardio) {
       const c = json.cardio;
       const distanceKm = Number(c.distanceKm) || 0;
       const durationMin = Number(c.durationMin) || 0;
       if (!distanceKm && !durationMin) return null;
-      return { kind: 'cardio', entry: {
-        id: uid(),
+      return { kind: 'cardio', entry: makeCardioEntry({
         date: (c.date && typeof c.date === 'string') ? c.date : todayStr(),
         type: c.type || 'วิ่ง',
         distanceKm,
         durationMin,
-        pace: paceStr(distanceKm, durationMin),
         avgHr: c.avgHr || null,
         notes: c.notes || ''
-      } };
+      }) };
     }
 
     if (json.kind === 'food' && Array.isArray(json.food)) {
@@ -3124,8 +3127,19 @@ ${JSON.stringify(draft.items.map(it => it.entry), null, 2)}
         if (it.kind === 'cardio') { state.cardio.push(it.entry); nCardio++; }
         else if (it.kind === 'food') { state.food.push(it.entry); nFood++; }
       }
-      if (nCardio) save('cardio-logs', state.cardio);
-      if (nFood) save('food-logs', state.food);
+      const okCardio = nCardio ? save('cardio-logs', state.cardio) : true;
+      const okFood = nFood ? save('food-logs', state.food) : true;
+
+      if (!okCardio || !okFood) {
+        // ถอน entry ที่เพิ่ง push ออกจาก state ให้ตรงกับ storage — ไม่งั้นกดยืนยันซ้ำจะได้รายการซ้ำ
+        if (nCardio) state.cardio.splice(state.cardio.length - nCardio, nCardio);
+        if (nFood) state.food.splice(state.food.length - nFood, nFood);
+        // ฝั่งที่บันทึกผ่านไปแล้วต้องเขียนทับด้วย state ที่ถอนแล้ว
+        if (okCardio && nCardio) save('cardio-logs', state.cardio);
+        if (okFood && nFood) save('food-logs', state.food);
+        toast('⚠️ บันทึกไม่สำเร็จ — พื้นที่เก็บข้อมูลเต็ม ลองลบข้อมูลเก่าแล้วลองใหม่');
+        return; // คงร่างไว้ให้ผู้ใช้กดยืนยันซ้ำได้
+      }
 
       state.pendingChatDraft = null;
       chatHistory = chatHistory.filter(m => !m.isDraft);
@@ -3182,6 +3196,8 @@ ${JSON.stringify(draft.items.map(it => it.entry), null, 2)}
     route(kind);
   }
 
+  const activeTab = () => document.querySelector('.tab-btn.active')?.dataset.tab;
+  const refreshIfActive = (tab) => { if (activeTab() === tab) routers[tab](); };
   const routers = { overview: renderOverview, cardio: renderCardio, gym: renderGym, food: renderFood, cycle: renderCycle, settings: renderSettings, coach: renderCoach };
   function route(tab) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
