@@ -310,6 +310,25 @@
     outline: none;
   }
 
+  /* iOS Safari clamps date/time controls at their intrinsic width and ignores
+     width:100%, so they spill out of .row columns and the next field overlaps them. */
+  input[type="date"],
+  input[type="time"] {
+    -webkit-appearance: none;
+    appearance: none;
+    min-width: 0;
+    max-width: 100%;
+    display: block;
+    text-align: center;
+    line-height: 1.35;
+    min-height: 34px;
+  }
+
+  input[type="date"]::-webkit-date-and-time-value {
+    text-align: center;
+    margin: 0;
+  }
+
   input:focus,
   select:focus,
   textarea:focus {
