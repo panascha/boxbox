@@ -1854,6 +1854,9 @@ async function extractFoodPhoto(input) {
     const st = document.getElementById('food-photo-status');
     const setStatus = (t) => { if (st) { st.textContent = t; st.style.color = t.startsWith('✅') ? 'var(--moss)' : t.startsWith('❌') ? 'var(--rose)' : 'var(--text-dim)'; } };
     setStatus('⏳ กำลังวิเคราะห์รูปเมนู/ออเดอร์...');
+    // ล้างที่มาเดิม ไม่งั้นตัวเลขจากรูปจะถูกอ้างด้วยแหล่งของการค้นหาครั้งก่อน
+    const srcEl = document.getElementById('nutri-source');
+    if (srcEl) srcEl.innerHTML = '';
 
     const aggregated = []; // {items from all photos}
 
@@ -2053,7 +2056,7 @@ async function extractFoodPhoto(input) {
         <div><label>วันที่</label><input type="date" id="f-date" value="${todayStr()}"></div>
       </div>
       <label>รายการอาหาร</label>
-      <input id="f-label" placeholder="เช่น สลัดอกไก่" style="width:100%;margin-bottom:6px;">
+      <input id="f-label" placeholder="เช่น สลัดอกไก่" style="width:100%;margin-bottom:6px;" oninput="document.getElementById('nutri-source').innerHTML=''">
       <div style="display:flex;gap:6px;margin-bottom:6px;">
           <input type="file" id="food-photo-input" accept="image/*" multiple style="display:none;" onchange="extractFoodPhoto(this)">
           <button class="ghost" style="flex:1;" onclick="document.getElementById('food-photo-input').click()">📸 อัพโหลดรูปเมนู/ออเดอร์</button>
@@ -2077,6 +2080,7 @@ async function extractFoodPhoto(input) {
           </div>
         </div>
       </div>
+      <div id="nutri-source" style="font-size:11px;color:var(--text-dim);margin:2px 0 6px;"></div>
       <button class="primary" onclick="addFood()">บันทึกมื้ออาหาร</button>
       <div id="food-photo-status" style="font-size:11px;color:var(--text-dim);margin-top:6px;min-height:1.2em;"></div>
     </div>
@@ -2110,20 +2114,30 @@ async function extractFoodPhoto(input) {
     const btn = document.getElementById('ai-estimate-btn');
     const label = document.getElementById('f-label').value.trim();
     if (!label) { toast('กรุณาใส่ชื่ออาหารก่อน'); return; }
+    const srcEl = document.getElementById('nutri-source');
+    if (srcEl) srcEl.innerHTML = '';
     btn.disabled = true; const old = btn.textContent; btn.textContent = '⏳ กำลังคำนวณ...';
 
-    const prompt = `ค้นหาข้อมูลโภชนาการจริงของอาหารนี้ และตอบเป็น JSON เดียวเท่านั้นในรูปแบบ {"calories": number, "protein": number} โดยใช้ข้อมูลจากการค้นหาเพื่อให้ได้ค่าที่ถูกต้อง สำหรับอาหาร standard serving size\n\n"${label}"`;
+    const prompt = `ค้นหาข้อมูลโภชนาการจริงของอาหารนี้ (1 เสิร์ฟมาตรฐาน) แล้วตอบเป็น JSON เดียวเท่านั้นในรูปแบบ {"calories": number, "protein": number, "serving": "ขนาด 1 เสิร์ฟ", "source": "ชื่อแหล่งข้อมูลที่ใช้"} โดยใช้ข้อมูลจากการค้นหาเพื่อให้ได้ค่าที่ถูกต้อง\n\n"${label}"`;
     const contents = [{ role: 'user', parts: [{ text: prompt }] }];
-    const res = await callGemini('auto', contents, 'ใช้ Google Search เพื่อค้นหาข้อมูลโภชนาการจริง และส่งเฉพาะ JSON ตอบกลับ ไม่มีคำอธิบายเพิ่มเติม', { temperature: 0.0, maxOutputTokens: 200, tools: [{ google_search: {} }] });
+    // maxOutputTokens ต้องเผื่อ thinking tokens ด้วย — ถ้าตั้งต่ำ (เช่น 200) โมเดลจะจบด้วย
+    // finish=MAX_TOKENS แล้วคืน parts ว่าง ทำให้ router ไล่ทิ้งทุกโมเดลจนขึ้น error.
+    const res = await callGemini('auto', contents, 'ใช้ Google Search เพื่อค้นหาข้อมูลโภชนาการจริง และส่งเฉพาะ JSON ตอบกลับ ไม่มีคำอธิบายเพิ่มเติม', { temperature: 0.0, maxOutputTokens: 2048, tools: [{ google_search: {} }] });
     btn.disabled = false; btn.textContent = old;
     if (res.error) { toast('AI เกิดปัญหา: ' + res.error); return; }
 
     // Try parse robustly
     let j = parseGeminiJSON(res.text);
+    if (!j || typeof j.calories !== 'number') {
+      // คำตอบแบบ grounded มักมีข้อความ/วงเล็บอ้างอิงปนมา ทำให้ตัวจับ JSON กว้างเกินไป —
+      // ดึงเฉพาะ object ที่มี key calories ออกมาก่อน
+      const m = String(res.text || '').match(/\{[^{}]*"?calories"?[^{}]*\}/i);
+      if (m) j = parseGeminiJSON(m[0]) || j;
+    }
     if (!j || typeof j.calories !== 'number' || typeof j.protein !== 'number') {
       // Retry: ask model to reformat into strict JSON only
       const retryPrompt = 'ตอบเป็น JSON object เท่านั้น เช่น {"calories": 123, "protein": 12} — ห้ามมีคำอธิบาย:\n' + res.text.slice(0, 800);
-      const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: retryPrompt }] }], null, { temperature: 0.0, maxOutputTokens: 200 });
+      const retry = await callGemini('auto', [{ role: 'user', parts: [{ text: retryPrompt }] }], null, { temperature: 0.0, maxOutputTokens: 1024 });
       if (!retry.error) j = parseGeminiJSON(retry.text);
     }
 
@@ -2131,8 +2145,21 @@ async function extractFoodPhoto(input) {
     try {
       if (typeof j.calories === 'number') document.getElementById('f-cal').value = Math.round(j.calories);
       if (typeof j.protein === 'number') document.getElementById('f-protein').value = Math.round(j.protein);
+      renderNutriSource(res, j);
       toast('เติมข้อมูลจาก AI แล้ว');
     } catch (e) { toast('ไม่สามารถแปลงผลจาก AI ได้'); }
+  }
+
+  // แสดงที่มาของตัวเลข: ลิงก์จาก Google Search grounding ถ้ามี, ไม่มีก็ใช้ field source ที่โมเดลตอบ
+  function renderNutriSource(res, j) {
+    const el = document.getElementById('nutri-source');
+    if (!el) return;
+    const links = (res.sources || []).filter(s => /^https:\/\/[^"'<>\s]+$/.test(s.uri)).slice(0, 3)
+      .map(s => `<a href="${s.uri}" target="_blank" rel="noopener">${escapeHtml(String(s.title).slice(0, 40))}</a>`)
+      .join(' · ');
+    const serving = j && j.serving ? ` · ต่อ ${escapeHtml(String(j.serving))}` : '';
+    const fallback = j && j.source ? escapeHtml(String(j.source).slice(0, 80)) : 'ประมาณการจากโมเดล (ไม่มีลิงก์อ้างอิง)';
+    el.innerHTML = `ที่มา: ${links || fallback}${serving} · โมเดล ${escapeHtml(res.modelUsed || '-')}`;
   }
 
   // ---------- render: cycle ----------
@@ -2508,6 +2535,17 @@ async function extractFoodPhoto(input) {
     }
   }
 
+  // แหล่งอ้างอิงจาก grounding metadata (เมื่อเรียกด้วย google_search) → [{title, uri}] ไม่ซ้ำ
+  function groundingSources(cand) {
+    const chunks = cand?.groundingMetadata?.groundingChunks || [];
+    const out = [];
+    for (const c of chunks) {
+      const w = c.web || c.retrievedContext;
+      if (w && w.uri && !out.some(o => o.uri === w.uri)) out.push({ title: w.title || w.domain || w.uri, uri: w.uri });
+    }
+    return out;
+  }
+
   async function callGemini(model, contents, systemInstruction, genConfig = {}) {
     const keys = geminiKeys();
     if (!keys.length) return { error: 'ยังไม่ได้ตั้งค่า API Key — ไปที่แท็บ Config แล้วใส่ Gemini API Key' };
@@ -2584,13 +2622,22 @@ async function extractFoodPhoto(input) {
           }
 
           const data = await res.json();
-          const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          const cand = data.candidates?.[0];
+          // รวมทุก part ที่เป็นข้อความจริง — เมื่อเปิด google_search/thinking ข้อความคำตอบ
+          // อาจไม่ได้อยู่ที่ parts[0] และอาจมี part ที่เป็น thought ปนมา.
+          const parts = cand?.content?.parts || [];
+          const text = parts.filter(p => p && typeof p.text === 'string' && !p.thought).map(p => p.text).join('').trim();
           if (text) {
             noteModelUsage(targetModel, 1);
-            return { text: text.trim(), modelUsed: targetModel };
+            return { text, modelUsed: targetModel, sources: groundingSources(cand) };
           }
-          // ตอบว่าง(เช่น finish=length/ไม่มี tool_calls) → ถือว่า model นี้ใช้ไม่ได้กับงานนี้ ไป model ถัดไป.
-          lastError = 'API ตอบกลับโดยไม่มีข้อความ';
+          // ตอบว่าง(เช่น finish=MAX_TOKENS เพราะ thinking กินโควตา output) → เก็บสาเหตุไว้วินิจฉัย
+          // แล้วถือว่า model นี้ใช้ไม่ได้กับงานนี้ ไป model ถัดไป.
+          const um = data.usageMetadata || {};
+          lastError = `API ตอบกลับโดยไม่มีข้อความ (${targetModel} finish=${cand?.finishReason || '?'} thoughts=${um.thoughtsTokenCount ?? 0} out=${um.candidatesTokenCount ?? 0})`;
+          try {
+            localStorage.setItem('_last_ai_empty', JSON.stringify({ model: targetModel, finishReason: cand?.finishReason || null, usage: um, parts: parts.length, time: Date.now() }));
+          } catch (e) { }
           all429 = false;
         } catch (e) {
           lastError = `เชื่อมต่อล้มเหลว: ${e.message}`;

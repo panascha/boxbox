@@ -5,3 +5,6 @@ memory/
 
 # Generated repomix output — only for AI context, never commit
 repomix-output.xml
+
+# Bug report screenshots — may contain API keys / personal data
+bug/
