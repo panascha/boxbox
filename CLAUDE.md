@@ -10,14 +10,14 @@ No build, compilation, or linting pipeline exists.
 
 ## Architecture
 
-Single-file PWA (`index.html`, ~2667 lines) — a personal fitness & training log tracker for iOS/Android home screens. All vanilla CSS, HTML, and JS, with no external package manager dependencies or framework. Hosted on GitHub Pages.
+Single-file PWA (`index.html`, ~3185 lines) — a personal fitness & training log tracker for iOS/Android home screens. All vanilla CSS, HTML, and JS, with no external package manager dependencies or framework. Hosted on GitHub Pages.
 
 ### File Layout in `index.html`
 - **Styles**: CSS design tokens in `:root`, layouts, mobile-first responsive definitions (max-width `480px`, centered).
 - **Data Layer & CRUD**: Global mutable `state` synced directly with `dataStore` wrapper around local storage tables (profile, cardio-logs, gym-logs, food-logs, cycle-settings, eating-seq, weight-log, coach-chats, gemini-keys).
 - **syncDrive (Google Drive)**: GIS OAuth 2.0 popup sync engine storing a single file `boxbox-backup.json` in the user's Drive root. Enqueues auto-sync with a 3s debounce after `dataStore.set()`.
 - **Render Engine**: Hand-authored JS template-literal components rendering into viewports (`renderOverview`, `renderCardio`, `renderGym`, `renderFood`, `renderCycle`, `renderSettings`, `renderCoach`). Simple client-side router (`route(tab)` maps 7 tab IDs to dynamic UI replacements).
-- **AI Coach**: All calls route through `callGemini(model, contents, systemInstruction, genConfig)` which is a priority + quota auto-router. Callers pass `'auto'` as model. `MODEL_REGISTRY` defines two tiers (`gen` / `search`) with `{model, rpd, prio}` entries; lower prio picked first. Tier auto-detected from whether caller passes `google_search` tool. Per-device daily quota in `localStorage['model-quota']` (not Drive-synced). 429 → key rotation then next-model fallback; dead/unsupported model → `markModelCap({enabled:false})` permanently skipped. Two photo OCR paths: `extractWorkoutPhoto()` (cardio tracker screenshots → distance/duration/pace/HR) and `extractFoodPhoto()` (menu/Grab/receipt images → food items JSON with calories/protein).
+- **AI Coach**: All calls route through `callGemini(model, contents, systemInstruction, genConfig)` which is a priority + quota auto-router. Callers pass `'auto'` as model. `MODEL_REGISTRY` defines two tiers (`gen` / `search`) with `{model, rpd, prio}` entries; lower prio picked first. Tier auto-detected from whether caller passes `google_search` tool. Per-device daily quota in `localStorage['model-quota']` (not Drive-synced). 429 → key rotation then next-model fallback; dead/unsupported model → `markModelCap({enabled:false})` permanently skipped. Two photo OCR paths: `extractFromPhoto()` (cardio tracker screenshots → distance/duration/pace/HR) and `extractFoodPhoto()` (menu/Grab/receipt images → food items JSON with calories/protein).
 
 ### Data Model & Sync Contract
 

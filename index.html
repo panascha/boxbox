@@ -1015,7 +1015,7 @@
 
   window.addEventListener('online', () => { if (syncDrive.connected) { syncDrive.status='online'; syncDrive.push(); } });
   window.addEventListener('offline', () => { if (syncDrive.connected) syncDrive.status = 'offline'; });
-  // pendingChatDraft: ร่างข้อมูลที่อ่านได้จากรูปในแชท รอผู้ใช้ยืนยัน — { type:'cardio'|'food'|'gym'|'weight', data:{...} }
+  // pendingChatDraft: ร่างข้อมูลที่อ่านได้จากรูปในแชท รอผู้ใช้ยืนยัน — { items:[{ kind:'cardio'|'food', entry:{...}, items? }] }
   let state = { profile: null, cardio: [], gym: [], food: [], cycle: null, eatingSeq: [false, false, false, false], weightLog: [], pendingChatDraft: null };
 
   function save(key, val) {
@@ -1678,12 +1678,48 @@
   if (location && (location.hostname === 'localhost' || location.search.includes('dev=true'))) try { parseGeminiJSON_tests(); } catch (e) {}
 
 
+  // "M:SS" ต่อ km จากระยะทาง+เวลา — คืน '' ถ้าคำนวณไม่ได้
+  function paceStr(distanceKm, durationMin) {
+    const paceMin = distanceKm ? durationMin / distanceKm : 0;
+    if (!paceMin || !isFinite(paceMin)) return '';
+    return `${Math.floor(paceMin)}:${Math.round((paceMin % 1) * 60).toString().padStart(2, '0')}`;
+  }
+
+  // Resize an image File to a JPEG data URL (≤ maxDim on the longest side).
+  async function imageToBase64Jpeg(file, maxDim = 1024, quality = 0.8) {
+    const img = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const iimg = new Image();
+        iimg.onload = () => resolve(iimg);
+        iimg.onerror = reject;
+        iimg.src = reader.result;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    let w = img.width, h = img.height;
+    if (w > maxDim || h > maxDim) {
+      const ratio = Math.min(maxDim / w, maxDim / h);
+      w = Math.round(w * ratio); h = Math.round(h * ratio);
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL('image/jpeg', quality);
+  }
+
   async function extractFromPhoto(input) {
     const files = Array.from(input.files || []);
     if (!files.length) return;
     const st = document.getElementById('photo-status');
     const overlay = document.getElementById('photo-overlay');
     const preview = document.getElementById('photo-preview');
+    // อ้าง element ใหม่ทุกครั้ง เพราะ renderCardio() สร้าง DOM ใหม่
+    const setPhotoStatus = (t) => {
+      const el = document.getElementById('photo-status');
+      if (el) { el.textContent = t; el.style.display = 'block'; }
+    };
 
     st && (st.style.display = 'block');
     overlay && overlay.classList.add('active');
@@ -1693,31 +1729,10 @@
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       try {
-        st.textContent = `⏳ กำลังวิเคราะห์รูป ${i + 1} จาก ${files.length}...`;
+        setPhotoStatus(`⏳ กำลังวิเคราะห์รูป ${i + 1} จาก ${files.length}...`);
 
         // Resize image to ≤1024px for API
-        const img = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const iimg = new Image();
-            iimg.onload = () => resolve(iimg);
-            iimg.onerror = reject;
-            iimg.src = reader.result;
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-
-        const maxDim = 1024;
-        let w = img.width, h = img.height;
-        if (w > maxDim || h > maxDim) {
-          const ratio = Math.min(maxDim / w, maxDim / h);
-          w = Math.round(w * ratio); h = Math.round(h * ratio);
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        const base64 = canvas.toDataURL('image/jpeg', 0.8);
+        const base64 = await imageToBase64Jpeg(file, 1024, 0.8);
 
         const prompt = `วิเคราะห์รูปภาพนี้ — มันคือภาพหน้าจอ Strava/แอพวิ่ง หรือหน้าจอลู่วิ่ง (Fairtex/Technogym/etc.)
 
@@ -1764,12 +1779,11 @@
           type: json.type || 'วิ่ง',
           distanceKm: Number(json.distanceKm) || 0,
           durationMin: Number(json.durationMin) || 0,
-          pace: json.distanceKm && json.durationMin ? `${Math.floor((json.durationMin / json.distanceKm))}:${Math.round(((json.durationMin / json.distanceKm) % 1) * 60).toString().padStart(2,'0')}` : '',
+          pace: paceStr(Number(json.distanceKm) || 0, Number(json.durationMin) || 0),
           avgHr: json.avgHr || null,
           notes: json.notes || ''
         };
 
-        state.cardio.push(entry);
         added.push(entry);
 
         preview && (preview.innerHTML = `<img src="${base64}" alt="อัพโหลดรูป">`);
@@ -1781,11 +1795,10 @@
       }
     }
 
-    if (added.length) {
-      save('cardio-logs', state.cardio);
+    if (added.length === 1) {
+      // รูปเดียว: เติมฟอร์มให้ตรวจก่อน ยังไม่บันทึกลง log (กันบันทึกซ้ำตอนกดปุ่มบันทึก)
       renderCardio();
-      // Populate form with last parsed entry so user can review/adjust before saving
-      const draft = added[added.length - 1];
+      const draft = added[0];
       const cDate = document.getElementById('c-date');
       const cType = document.getElementById('c-type');
       const cDist = document.getElementById('c-dist');
@@ -1798,14 +1811,20 @@
       if (cDur && draft.durationMin) cDur.value = fmtDuration(draft.durationMin);
       if (cHr && draft.avgHr) cHr.value = draft.avgHr;
       if (cNotes && draft.notes) cNotes.value = draft.notes;
-      st && (st.textContent = `✅ อ่านค่าแล้ว (${added.length} รูป) — ตรวจสอบแล้วกด 'บันทึกกิจกรรมคาร์ดิโอ' อีกครั้งหรือแก้ก่อนบันทึก`);
-      st && (st.style.display = 'block');
-      toast(`อ่านค่าจากรูปแล้ว — ตรวจสอบก่อนกดบันทึกอีกครั้ง`);
+      setPhotoStatus(`✅ อ่านค่าแล้ว — ตรวจสอบแล้วกด 'บันทึกกิจกรรมคาร์ดิโอ'`);
+      toast('อ่านค่าจากรูปแล้ว — ตรวจสอบก่อนกดบันทึก');
+    } else if (added.length > 1) {
+      // หลายรูป: ฟอร์มเดียวรับได้รูปเดียว จึงบันทึกทั้งหมดเลย
+      state.cardio.push(...added);
+      save('cardio-logs', state.cardio);
+      renderCardio();
+      setPhotoStatus(`✅ บันทึกแล้ว ${added.length} รายการจากรูป`);
+      toast(`บันทึก ${added.length} รายการจากรูปแล้ว`);
     } else {
+      st && (st.style.display = 'none');
       toast('ไม่พบข้อมูลคาร์ดิโอจากรูปใดๆ');
     }
 
-    st && (st.style.display = 'none');
     overlay && overlay.classList.remove('active');
     try { input.value = ''; } catch (e) {}
   }
@@ -1824,18 +1843,7 @@ async function extractFoodPhoto(input) {
       try {
         setStatus(`⏳ กำลังวิเคราะห์รูปเมนู ${i + 1} จาก ${files.length}...`);
         // Resize to ≤1024px
-        const img = await new Promise((resolve, reject) => {
-          const r = new FileReader();
-          r.onload = () => { const ii = new Image(); ii.onload = () => resolve(ii); ii.onerror = reject; ii.src = r.result; };
-          r.onerror = reject; r.readAsDataURL(file);
-        });
-        const maxDim = 1024;
-        let w = img.width, h = img.height;
-        if (w > maxDim || h > maxDim) { const ratio = Math.min(maxDim / w, maxDim / h); w = Math.round(w * ratio); h = Math.round(h * ratio); }
-        const canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        const base64 = canvas.toDataURL('image/jpeg', 0.8);
+        const base64 = await imageToBase64Jpeg(file, 1024, 0.8);
 
         const prompt = `มองภาพนี้ — อาจเป็นรูปเมนูร้านอาหาร, ภาพหน้าจอแอพส่งอาหาร (Grab/Lineman/ShopeeFood/foodpanda/UberEats) หรือใบเสร็จสั่งอาหาร\n\nอ่านรายการอาหารที่สั่ง/อยู่ในภาพ:\n- ระบุชื่อเมนูเป็นภาษาไทย\n- ระบุจำนวน (เช่น 2 กล่อง, 1 จาน)\n- ประเมินแคลอรี่และโปรตีนต่อ 1 ส่วน (standard serving) ตามข้อมูลที่ค้นได้หรือค่าเฉลี่ยที่เชื่อถือได้\n- ถ้าเห็นราคา/ขนาดที่ระบุไว้ ให้ใช้เพื่อปรับค่าให้ใกล้เคียง\n\nตอบเป็น JSON array [] เท่านั้น ห้ามอธิบายหรือคำอื่น ๆ:\n[\n  {\n    "label": "ชื่อเมนู เช่น ข้าวมันไก่",\n    "qty": 1,\n    "calories": 550,\n    "protein": 30\n  }\n]\nถ้าอ่านไม่ได้เลย ให้ตอบ []`;
 
@@ -2380,10 +2388,23 @@ async function extractFoodPhoto(input) {
   async function loadChatHistory() {
     try { chatHistory = dataStore.get('coach-chats'); }
     catch (e) { chatHistory = []; }
+    if (!Array.isArray(chatHistory)) chatHistory = [];
+    // ล้างของเก่า: การ์ดรีวิวที่ค้าง และ message รูป base64 ที่เคยถูกบันทึกไว้
+    const before = chatHistory.length;
+    chatHistory = chatHistory.filter(m => m && !m.isDraft && !(m.html && !m.text));
+    if (chatHistory.length !== before) saveChatHistory();
   }
 
   function saveChatHistory() {
-    save('coach-chats', chatHistory);
+    // Draft cards and photo thumbnails are session-only — raw image data would
+    // blow the localStorage quota and bloat the Drive backup.
+    const persist = chatHistory.filter(m => !m.isDraft).map(m => {
+      if (!m.imgs) return m;
+      const copy = Object.assign({}, m);
+      delete copy.imgs;
+      return copy;
+    });
+    save('coach-chats', persist);
   }
 
   // ---------- Model auto-router ----------
@@ -2733,6 +2754,11 @@ ${trendLines}
     if (!chatHistory.length) return;
 
     el.innerHTML = chatHistory.map(m => {
+      if (m.imgs && m.imgs.length) {
+        // Photo message — thumbnails only exist in this session
+        const imgs = m.imgs.map(src => `<img src="${src}" alt="รูปที่ส่ง" style="max-width:100%; border-radius:8px; margin-top:6px;">`).join('');
+        return `<div class="chat-msg ${m.role}"><div class="user-msg">${escapeHtml(m.text || '')}</div>${imgs}</div>`;
+      }
       if (m.html) {
         // Rich HTML message (draft review cards)
         return `<div class="chat-msg ${m.role}">${m.html}</div>`;
@@ -2768,12 +2794,12 @@ ${trendLines}
       const draft = state.pendingChatDraft;
       const correctionPrompt = `อัปเดตข้อมูลนี้ตามคำขอของผู้ใช้:
 
-ข้อมูลปัจจุบัน:
-${JSON.stringify(draft.data, null, 2)}
+ข้อมูลปัจจุบัน (JSON array):
+${JSON.stringify(draft.items.map(it => it.entry), null, 2)}
 
 คำขอแก้ไข: ${text}
 
-ตอบกลับด้วย JSON ที่อัปเดตแล้วเท่านั้น ไม่ต้องมีคำอธิบายเพิ่มเติม ให้ผลลัพธ์เป็น JSON object ที่มีโครงสร้างเดียวกับข้อมูลเดิม`;
+ตอบกลับเป็น JSON array ที่อัปเดตแล้วเท่านั้น — จำนวนสมาชิกเท่าเดิม key เดิมทุกตัว ห้ามมีคำอธิบายเพิ่มเติม`;
 
       const contents = [{ role: 'user', parts: [{ text: correctionPrompt }] }];
       const result = await callGemini('auto', contents, 'คุณเป็นผู้ช่วยที่แปลงคำขอแก้ไขข้อมูลเป็น JSON กรุณาตอบด้วย JSON เท่านั้น');
@@ -2782,20 +2808,28 @@ ${JSON.stringify(draft.data, null, 2)}
       if (result.error) {
         chatHistory.push({ role: 'bot', text: `⚠️ ไม่สามารถแก้ไขข้อมูลได้: ${result.error}` });
       } else {
-        try {
-          // Parse corrected data
-          let corrected = result.text.trim();
-          // Strip markdown code fence if present
-          if (corrected.startsWith('```')) {
-            corrected = corrected.replace(/^```(?:json)?\n/, '').replace(/\n```$/, '');
-          }
-          const updated = JSON.parse(corrected);
-          state.pendingChatDraft.data = updated;
+        const updated = parseGeminiJSON(result.text);
+        if (Array.isArray(updated) && updated.length === draft.items.length) {
+          draft.items.forEach((it, i) => {
+            const u = updated[i] || {};
+            const merged = Object.assign({}, it.entry);
+            // รับเฉพาะ key เดิมของ entry — กัน AI สลับลำดับแล้วยัด field ผิดชนิดเข้ามา
+            for (const k of Object.keys(merged)) {
+              if (k !== 'id' && u[k] !== undefined) merged[k] = u[k];
+            }
+            if (it.kind === 'cardio') {
+              merged.distanceKm = Number(merged.distanceKm) || 0;
+              merged.durationMin = Number(merged.durationMin) || 0;
+              merged.pace = paceStr(merged.distanceKm, merged.durationMin);
+            }
+            if (it.kind === 'food') it.items = null; // รายการย่อยเดิมอาจไม่ตรงกับค่าที่แก้แล้ว
+            it.entry = merged;
+          });
           renderChatDraftReviewCard();
           chatHistory.push({ role: 'bot', text: '✅ อัปเดตข้อมูลแล้ว กรุณาตรวจสอบด้านบน' });
-        } catch (e) {
-          console.error('parse corrected data failed:', e);
-          chatHistory.push({ role: 'bot', text: '⚠️ แก้ไขข้อมูลไม่สำเร็จ กรุณาลองใหม่' });
+        } else {
+          console.warn('corrected draft shape mismatch', updated);
+          chatHistory.push({ role: 'bot', text: "⚠️ แก้ไขข้อมูลไม่สำเร็จ กรุณาลองใหม่ หรือกด 'ยกเลิก' เพื่อคุยต่อ" });
         }
       }
       saveChatHistory();
@@ -2813,6 +2847,7 @@ ${JSON.stringify(draft.data, null, 2)}
     const contents = [];
     const recent = chatHistory.slice(-20);
     for (const m of recent) {
+      if (!m.text) continue; // skip message ที่ไม่มีข้อความ (เช่น การ์ดรูปเก่า)
       if (m.role === 'user') {
         contents.push({ role: 'user', parts: [{ text: m.text }] });
       } else if (m.role === 'bot') {
@@ -2833,79 +2868,162 @@ ${JSON.stringify(draft.data, null, 2)}
   }
 
   // ---------- chat photo draft workflow ----------
+  // อ่านรูป 1 ใบ: จำแนกประเภทแล้วดึงข้อมูลออกมาเป็น entry พร้อมบันทึก
+  // คืนค่า { kind:'cardio'|'food', entry, items? } หรือ null ถ้าอ่านไม่ได้
+  async function classifyAndExtractPhoto(base64) {
+    const prompt = `ดูรูปนี้แล้วบอกว่าเป็นข้อมูลประเภทไหน จากนั้นดึงข้อมูลออกมา
+
+ประเภทที่รองรับ:
+- "cardio" = ภาพหน้าจอ Strava/แอพวิ่ง หรือหน้าจอลู่วิ่ง (มีระยะทาง เวลา pace หรือ HR)
+- "food" = รูปอาหาร เมนูร้าน ภาพหน้าจอแอพสั่งอาหาร (Grab/Lineman/ShopeeFood/foodpanda) หรือใบเสร็จ
+- "unknown" = อย่างอื่นที่ไม่เข้าสองประเภทนี้
+
+ตอบเป็น JSON object เท่านั้น ห้ามมีข้อความอื่น:
+{
+  "kind": "cardio" หรือ "food" หรือ "unknown",
+  "cardio": {
+    "type": "วิ่ง" หรือ "เดิน" หรือ "เดินขึ้นเนิน/ชัน" หรือ "เดิน/วิ่งปน (Fartlek)",
+    "distanceKm": ตัวเลข (km),
+    "durationMin": ตัวเลข (นาที) — แปลง MM:SS เป็นนาทีทศนิยม เช่น 53:57 = 53.95,
+    "avgHr": ตัวเลข (bpm) หรือ null,
+    "date": "YYYY-MM-DD จากวันที่ในรูป หรือ null",
+    "notes": "ข้อมูลเพิ่มเติม เช่น incline, calories, pace เฉลี่ย หรือ null"
+  },
+  "food": [ { "label": "ชื่อเมนูภาษาไทย", "qty": 1, "calories": 550, "protein": 30 } ]
+}
+ใส่เฉพาะ key ที่ตรงกับ kind ที่เลือก ถ้าอ่านค่าไหนไม่ได้ให้ใส่ null — อย่าเดา ใช้ข้อมูลจากรูปเท่านั้น`;
+
+    const contents = [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: base64.split(',')[1] } }] }];
+    const result = await callGemini('auto', contents, null, { temperature: 0.1, maxOutputTokens: 2048 });
+    if (result.error) { console.warn('classifyAndExtractPhoto error', result.error); return null; }
+
+    const json = parseGeminiJSON(result.text);
+    if (!json || !json.kind) { console.warn('classifyAndExtractPhoto: unparsable', result.text); return null; }
+
+    if (json.kind === 'cardio' && json.cardio) {
+      const c = json.cardio;
+      const distanceKm = Number(c.distanceKm) || 0;
+      const durationMin = Number(c.durationMin) || 0;
+      if (!distanceKm && !durationMin) return null;
+      return { kind: 'cardio', entry: {
+        id: uid(),
+        date: (c.date && typeof c.date === 'string') ? c.date : todayStr(),
+        type: c.type || 'วิ่ง',
+        distanceKm,
+        durationMin,
+        pace: paceStr(distanceKm, durationMin),
+        avgHr: c.avgHr || null,
+        notes: c.notes || ''
+      } };
+    }
+
+    if (json.kind === 'food' && Array.isArray(json.food)) {
+      const items = json.food.filter(x => x && x.label);
+      if (!items.length) return null;
+      const qty = (x) => Number(x.qty) || 1;
+      const now = new Date();
+      return { kind: 'food', items, entry: {
+        id: uid(),
+        date: todayStr(),
+        time: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
+        label: items.map(x => `${qty(x) > 1 ? qty(x) + 'x ' : ''}${x.label}`).join(', '),
+        calories: items.reduce((s, x) => s + (Number(x.calories) || 0) * qty(x), 0),
+        protein: items.reduce((s, x) => s + (Number(x.protein) || 0) * qty(x), 0)
+      } };
+    }
+
+    return null;
+  }
+
   function formatChatDraftData(draft) {
-    if (!draft || !draft.data) return '';
-    const d = draft.data;
-    const type = draft.type;
+    if (!draft || !draft.items || !draft.items.length) return 'ไม่พบข้อมูล';
 
-    if (type === 'cardio') {
-      const parts = [];
-      if (d.distance) parts.push(`${d.distance} km`);
-      if (d.duration) parts.push(fmtDuration(d.duration));
-      if (d.pace) parts.push(`Pace ${fmtDuration(d.pace)}/km`);
-      if (d.avgHR) parts.push(`HR ${d.avgHR} bpm`);
-      if (d.notes) parts.push(`หมายเหตุ: ${d.notes}`);
-      return parts.length ? '📸 พบข้อมูลการวิ่ง: ' + parts.join(' / ') : 'ไม่พบข้อมูล';
-    }
+    const multi = (draft.total || draft.items.length) > 1;
+    return draft.items.map((it, i) => {
+      const n = multi ? `รูปที่ ${it.srcIndex || i + 1} — ` : '';
+      const e = it.entry;
 
-    if (type === 'food') {
-      if (!d.items || !d.items.length) return 'ไม่พบรายการอาหาร';
-      const total = d.items.reduce((sum, it) => sum + (it.cal || 0), 0);
-      const totalP = d.items.reduce((sum, it) => sum + (it.protein || 0), 0);
-      const itemList = d.items.map(it => `- ${it.item}: ${it.cal || 0} kcal, ${it.protein || 0}g โปรตีน`).join('\n');
-      return `🍽️ พบรายการอาหาร ${d.items.length} รายการ:\n${itemList}\n\n📊 รวม: ${total} kcal / ${totalP}g โปรตีน`;
-    }
+      if (it.kind === 'cardio') {
+        const parts = [];
+        if (e.distanceKm) parts.push(`${e.distanceKm} km`);
+        if (e.durationMin) parts.push(fmtDuration(e.durationMin));
+        if (e.pace) parts.push(`เพซ ${e.pace}/km`);
+        if (e.avgHr) parts.push(`HR ${e.avgHr} bpm`);
+        parts.push(fmtDate(e.date));
+        return `${n}🏃 ${e.type}: ${parts.join(' / ')}` + (e.notes ? `\n   หมายเหตุ: ${e.notes}` : '');
+      }
 
-    if (type === 'gym') {
-      if (!d.exercises || !d.exercises.length) return 'ไม่พบรายการออกกำลังกาย';
-      const exList = d.exercises.map(ex => `- ${ex.name}: ${ex.sets || 0} sets × ${ex.reps || 0} reps @ ${ex.weight || 0} kg`).join('\n');
-      return `🏋️ พบรายการออกกำลังกาย ${d.exercises.length} รายการ:\n${exList}`;
-    }
+      if (it.kind === 'food') {
+        if (!it.items || !it.items.length) {
+          return `${n}🍽️ ${e.label}\n   รวม: ${e.calories} kcal / ${e.protein} g โปรตีน (${e.time})`;
+        }
+        const list = it.items.map(x => {
+          const q = Number(x.qty) || 1;
+          return `   - ${q > 1 ? q + 'x ' : ''}${x.label}: ${Number(x.calories) || 0} kcal / ${Number(x.protein) || 0} g`;
+        }).join('\n');
+        return `${n}🍽️ อาหาร ${it.items.length} รายการ\n${list}\n   รวม: ${e.calories} kcal / ${e.protein} g โปรตีน (${e.time})`;
+      }
 
-    if (type === 'weight') {
-      return `⚖️ พบน้ำหนัก: ${d.weight || 0} kg` + (d.date ? ` (${d.date})` : '');
-    }
-
-    return JSON.stringify(d);
+      return '';
+    }).filter(Boolean).join('\n\n');
   }
 
   async function handleChatPhotoUpload(input) {
+    const overlay = document.getElementById('photo-overlay');
+    const ovText = document.getElementById('photo-overlay-text');
     try {
       const files = Array.from(input.files || []);
       if (!files.length) return;
+      try { input.value = ''; } catch (e) {}
 
-      const file = files[0];
-      const currentTab = document.querySelector('.tab-btn.active').dataset.tab;
-      let extractFn;
-      if (currentTab === 'cardio') extractFn = extractFromPhoto;
-      else if (currentTab === 'food') extractFn = extractFoodPhoto;
-      else if (currentTab === 'coach') extractFn = extractFromPhoto;
-      else { console.log('chat photo upload skipped: unsupported tab'); return; }
+      // Thumbnail เก็บในหน่วยความจำเท่านั้น ไม่บันทึกลง storage
+      const thumbs = [];
+      for (const f of files) {
+        try { thumbs.push(await imageToBase64Jpeg(f, 320, 0.6)); }
+        catch (e) { console.warn('thumbnail failed', f.name, e); }
+      }
+      chatHistory.push({ role: 'user', text: `📸 ส่งรูป ${files.length} รูป`, imgs: thumbs });
+      saveChatHistory();
+      renderChatMessages();
 
-      // Show image preview in chat before extraction
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const imgHtml = `<img src="${e.target.result}" style="max-width: 100%; border-radius: 8px; margin-top: 8px;" />`;
-        chatHistory.push({ role: 'user', html: imgHtml });
+      overlay && overlay.classList.add('active');
+
+      const items = [];
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        if (ovText) ovText.textContent = `กำลังวิเคราะห์รูป ${i + 1} จาก ${files.length}...`;
+        try {
+          const base64 = await imageToBase64Jpeg(f, 1024, 0.8);
+          const res = await classifyAndExtractPhoto(base64);
+          if (res) items.push(Object.assign({ srcIndex: i + 1 }, res));
+          else console.warn('no data extracted from', f.name);
+        } catch (e) {
+          console.warn('chat photo extract failed', f.name, e);
+        }
+      }
+
+      overlay && overlay.classList.remove('active');
+      if (ovText) ovText.textContent = 'กำลังวิเคราะห์รูป...';
+
+      if (!items.length) {
+        chatHistory.push({ role: 'bot', text: '⚠️ อ่านข้อมูลจากรูปไม่ได้ — รองรับภาพหน้าจอคาร์ดิโอ และรูปอาหาร/เมนู/ใบเสร็จ' });
         saveChatHistory();
         renderChatMessages();
-      };
-      reader.readAsDataURL(file);
+        return;
+      }
 
-      const overlay = document.getElementById('photo-overlay');
-      overlay.classList.add('active');
-
-      const data = await extractFn(input);
-      state.pendingChatDraft = { type: currentTab, data };
+      state.pendingChatDraft = { items, total: files.length };
       renderChatDraftReviewCard();
 
-      overlay.style.display = 'none';
-      try { input.value = ''; } catch (e) {}
+      if (items.length < files.length) {
+        chatHistory.push({ role: 'bot', text: `⚠️ อ่านไม่ได้ ${files.length - items.length} รูป — ข้ามไปแล้ว` });
+        saveChatHistory();
+        renderChatMessages();
+      }
     } catch (e) {
       console.error('chat photo upload failed:', e);
+      overlay && overlay.classList.remove('active');
       toast(`❌ ${e.message || 'วิเคราะห์รูปไม่สำเร็จ'}`);
-      const overlay = document.getElementById('photo-overlay');
-      if (overlay) overlay.style.display = 'none';
     }
   }
 
@@ -2926,30 +3044,27 @@ ${JSON.stringify(draft.data, null, 2)}
         '<button onclick="editChatDraft()">แก้ไข</button>' +
       '</div>';
 
-    chatHistory.push({ role: 'bot', html, isDraft: true });
+    chatHistory.push({ role: 'bot', text: formatted, html, isDraft: true });
     renderChatMessages();
   }
 
   async function confirmChatDraft() {
     try {
       const draft = state.pendingChatDraft;
-      if (!draft) return;
+      if (!draft || !draft.items || !draft.items.length) return;
 
-      const map = {
-        cardio: 'cardio-logs',
-        food: 'food-logs',
-        gym: 'gym-logs',
-        weight: 'weight-log'
-      };
-      const key = map[draft.type];
-      if (key) {
-        state[draft.type].push(draft.data);
-        await save(key, state[draft.type]);
-        route(draft.type);
+      let nCardio = 0, nFood = 0;
+      for (const it of draft.items) {
+        if (it.kind === 'cardio') { state.cardio.push(it.entry); nCardio++; }
+        else if (it.kind === 'food') { state.food.push(it.entry); nFood++; }
       }
+      if (nCardio) save('cardio-logs', state.cardio);
+      if (nFood) save('food-logs', state.food);
 
       state.pendingChatDraft = null;
       chatHistory = chatHistory.filter(m => !m.isDraft);
+      const summary = [nCardio ? `คาร์ดิโอ ${nCardio} รายการ` : '', nFood ? `อาหาร ${nFood} รายการ` : ''].filter(Boolean).join(' และ ');
+      chatHistory.push({ role: 'bot', text: `✅ บันทึกแล้ว: ${summary}` });
       saveChatHistory();
       renderChatMessages();
       toast('✅ บันทึกข้อมูลสำเร็จ');
@@ -3062,7 +3177,7 @@ ${JSON.stringify(draft.data, null, 2)}
 
 <div id="photo-overlay" class="photo-overlay">
   <div class="spinner"></div>
-  <div style="color:var(--surface); font-size:14px; font-weight:500;">กำลังวิเคราะห์รูป...</div>
+  <div id="photo-overlay-text" style="color:var(--surface); font-size:14px; font-weight:500;">กำลังวิเคราะห์รูป...</div>
 </div>
 
 </body>
