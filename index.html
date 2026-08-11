@@ -47,21 +47,29 @@
     touch-action: manipulation;
   }
 
+  html, body {
+    height: 100%;
+  }
+
   body {
     margin: 0;
     background: var(--bg);
     color: var(--text);
     font-family: var(--font-body);
     -webkit-font-smoothing: antialiased;
+    overscroll-behavior-y: contain;
   }
 
   .app {
     max-width: 480px;
     margin: 0 auto;
+    min-height: 100vh;
+    min-height: 100dvh;
     padding: max(12px, env(safe-area-inset-top))
              max(12px, env(safe-area-inset-right))
              max(30px, env(safe-area-inset-bottom))
              max(12px, env(safe-area-inset-left));
+    background: var(--bg);
   }
 
   /* Header */
