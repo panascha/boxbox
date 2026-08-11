@@ -870,9 +870,9 @@
       return v ? parseInt(v, 10) : 0;
     },
 
-    // Build full export object (excludes gemini-keys — never backed up)
-    exportAll() {
-      const SKIP = ['gemini-keys'];
+    // Build full export object. API keys included only when includeKeys=true.
+    exportAll(includeKeys = false) {
+      const SKIP = includeKeys ? [] : ['gemini-keys'];
       const tables = {};
       for (const k of TABLES) {
         if (SKIP.includes(k)) continue;
@@ -889,10 +889,10 @@
     },
 
     // Import — if merge=true, only upgrade per-table where cloud mtime > local
-    importAll(data, merge) {
+    importAll(data, merge, includeKeys = false) {
       if (!data || !data.tables) throw new Error('Invalid backup format');
       for (const k of Object.keys(data.tables)) {
-        if (!TABLES.includes(k) || k === 'gemini-keys') continue;
+        if (!TABLES.includes(k) || (!includeKeys && k === 'gemini-keys')) continue;
         if (merge) {
           const cloudMtime = (data._mtimes && data._mtimes[k]) || 0;
           const localMtime = this.mtime(k);
@@ -2369,13 +2369,13 @@ async function extractFoodPhoto(input) {
   }
 
   function exportAllData() {
-    const payload = dataStore.exportAll();
+    const payload = dataStore.exportAll(true);
     const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = `boxbox-backup-${todayStr()}.json`; a.click();
     URL.revokeObjectURL(url);
-    toast('ส่งออกข้อมูลสำเร็จ');
+    toast('ส่งออกข้อมูลสำเร็จ (รวม API keys — เก็บไฟล์ให้ปลอดภัย)');
   }
 
   function importAllData(input) {
@@ -2392,7 +2392,7 @@ async function extractFoodPhoto(input) {
         if (!keys.length) { toast('ไม่พบข้อมูลที่ถูกต้องในไฟล์'); return; }
         if (!confirm(`พบข้อมูล ${keys.length} รายการ (${keys.join(', ')})\n\nต้องการเขียนทับข้อมูลปัจจุบันหรือไม่?`)) return;
         const wrapped = data.tables ? data : { tables: data, _mtimes: {} };
-        dataStore.importAll(wrapped, false);
+        dataStore.importAll(wrapped, false, true);
         toast('นำเข้าข้อมูลสำเร็จ — กำลังโหลดใหม่...');
         setTimeout(() => location.reload(), 500);
       } catch (e) {
